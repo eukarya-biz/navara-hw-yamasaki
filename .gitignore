@@ -1,0 +1,26 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+.vite/
+
+# Environment / secrets -- required by the submission rules
+.env
+.env.*
+!.env.example
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Logs
+*.log
+npm-debug.log*
+pnpm-debug.log*
+
+# NOTE: public/data/ is intentionally NOT ignored. The PLATEAU underground
+# tileset and the walk grid are what the scene loads at runtime, so they have
+# to be committed for GitHub Pages to serve them.
