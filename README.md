@@ -4,12 +4,24 @@ PLATEAU の新宿区地下街モデル(LOD4)を、子どもの目線の高さで
 
 ## 起動
 
+**必要なもの**: Node.js 18以上(Vite 5の要件。`node --version` で確認)。
+
+以下をターミナルにそのまま貼り付ければ、クローンから起動まで一気に進む:
+
 ```bash
+git clone https://github.com/eukarya-biz/navara-hw-yamasaki.git
+cd navara-hw-yamasaki
 npm install
 npm run dev
 ```
 
-表示された `http://localhost:5173/` を開く。画面をクリックするとマウスで視点が回る(Esc で解除)。
+ターミナルに表示された `http://localhost:5173/` をブラウザで開く。「はじめる」を押すと開始。
+画面をクリックするとマウスで視点が回る(Esc で解除)。W/S で前進・後退、A/D で回転、Shiftで走る。
+
+`git` が無い場合は、リポジトリ右上の **Code > Download ZIP** から取得し、
+展開したフォルダで `cd` してから上記の `npm install` 以降を実行すればよい。
+
+**公開版**: https://eukarya-biz.github.io/navara-hw-yamasaki/(ローカル起動が不要な場合はこちら)
 
 ## このシーンの前提
 
