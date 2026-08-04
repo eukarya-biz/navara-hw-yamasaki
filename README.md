@@ -21,7 +21,7 @@ npm run dev
 `git` が無い場合は、リポジトリ右上の **Code > Download ZIP** から取得し、
 展開したフォルダで `cd` してから上記の `npm install` 以降を実行すればよい。
 
-**公開版**: https://eukarya-biz.github.io/navara-hw-yamasaki/(ローカル起動が不要な場合はこちら)
+**公開版**: [https://eukarya-biz.github.io/navara-hw-yamasaki/](https://eukarya-biz.github.io/navara-hw-yamasaki/) (ローカル起動が不要な場合はこちら)
 
 ## このシーンの前提
 
