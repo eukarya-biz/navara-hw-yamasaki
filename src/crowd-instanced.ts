@@ -20,16 +20,16 @@
 // so the crowd would simply never move -- positions would quantise to a ~5 cm
 // lattice and people would jump between cells instead of walking.
 //
-// So the InstancedMesh itself is parked at one anchor (full float64 ECEF, on the
-// object's own transform) and every instance matrix is a *local* offset in metres
-// from that anchor. A 137 m local offset round-trips through float32 with 5e-6 m
-// error. This is also exactly what the API means by "local position relative to
-// the parent group".
+// So the InstancedMesh itself is placed at one anchor with `geodetic` (the base
+// class fixes its world matrix from full-precision geodetic input) and every
+// instance matrix is a *local* offset in metres from that anchor. A 137 m local
+// offset round-trips through float32 with 5e-6 m error. This is also exactly
+// what the API means by "local position relative to the parent group".
 //
-// Frame convention: the anchor uses the North-Up-East frame, so local
-// (x, y, z) = (metres north, metres up, metres east). Model forward is +Z,
-// lateral is ±X, which is what makes a rotation about local X swing a limb
-// forwards and backwards.
+// Frame convention: `geodetic` builds a West-Up-North frame, so local
+// (x, y, z) = (metres west, metres up, metres north). Model forward is +Z,
+// which is north at heading 0; lateral is ±X, which is what makes a rotation
+// about local X swing a limb forwards and backwards.
 
 import {
   BoxGeometry,
@@ -45,12 +45,10 @@ import {
   InstancedMeshDesc,
   type ViewContext,
   type InstancedMeshConfig,
-  type InstancedMeshUpdate,
   type InstancedChildConfig,
-  geodeticToVector3,
-  northUpEastToFixedFrame,
 } from "@navaramap/three";
 import type ThreeView from "@navaramap/three";
+import type { SceneView } from "./descriptions";
 import { metresPerDegree, type MetresPerDegree } from "./geo";
 import type { WalkGrid, SurfacePair } from "./walkgrid";
 
@@ -77,14 +75,17 @@ const CROWD_COLORS = [
 /** Which body part an instanced descriptor draws. */
 export type CrowdPart = "torso" | "head" | "legL" | "legR" | "armL" | "armR";
 
-const PART_KEYS: Record<CrowdPart, string> = {
-  torso: "crowdTorso",
-  head: "crowdHead",
-  legL: "crowdLegL",
-  legR: "crowdLegR",
-  armL: "crowdArmL",
-  armR: "crowdArmR",
-};
+const CROWD_PARTS: readonly CrowdPart[] = [
+  "torso",
+  "head",
+  "legL",
+  "legR",
+  "armL",
+  "armR",
+];
+
+/** One registered key; the part is in the config, so the six adds share it. */
+const CROWD_PART_KEY = "crowdPart";
 
 // ---------------------------------------------------------------------------
 // Per-person simulation state (shared by all six descriptors)
@@ -103,7 +104,7 @@ export type Person = {
   color: Color;
   /** Metres from the player, refreshed each frame. */
   distM: number;
-  /** Cached local offset from the anchor, in metres (north, up, east). */
+  /** Cached local offset from the anchor, in metres (west, up, north). */
   localX: number;
   localY: number;
   localZ: number;
@@ -166,26 +167,12 @@ const ARM_SWING = 0.35;
  */
 export class CrowdSim {
   readonly people: Person[] = [];
-  readonly anchorEcef: Vector3;
-  readonly anchorQuat: Quaternion;
   /** Degree-to-metre scale at the anchor; the area is small enough for one. */
   private readonly mPerDeg: MetresPerDegree;
   private lastMs: number | null = null;
 
   constructor(private opts: CrowdSimOptions) {
-    const a = opts.anchor;
-    this.mPerDeg = metresPerDegree(a.lat);
-
-    // geodeticToVector3 takes degrees (navara >= 0.1.0).
-    this.anchorEcef = geodeticToVector3({
-      lat: a.lat,
-      lng: a.lng,
-      height: a.alt,
-    });
-
-    const m = northUpEastToFixedFrame(this.anchorEcef);
-    this.anchorQuat = new Quaternion().setFromRotationMatrix(m);
-
+    this.mPerDeg = metresPerDegree(opts.anchor.lat);
     this.populate();
   }
 
@@ -233,9 +220,9 @@ export class CrowdSim {
 
   private refreshLocal(p: Person): void {
     const a = this.opts.anchor;
-    p.localX = (p.lat - a.lat) * this.mPerDeg.lat; // north
+    p.localX = -(p.lng - a.lng) * this.mPerDeg.lng; // west
     p.localY = p.alt - a.alt; // up
-    p.localZ = (p.lng - a.lng) * this.mPerDeg.lng; // east
+    p.localZ = (p.lat - a.lat) * this.mPerDeg.lat; // north
   }
 
   /** Advance the simulation. Call once per frame, before the descriptors draw. */
@@ -364,7 +351,7 @@ type PartDescription = {
 };
 
 export type CrowdPartConfig = InstancedMeshConfig & {
-  [k: string]: unknown;
+  crowdPart?: PartDescription;
 };
 
 /** Geometry for one body part, pre-translated so its own pivot sits at origin. */
@@ -424,18 +411,16 @@ const ZERO_SCALE = new Vector3(0, 0, 0);
 /**
  * One body part, instanced across the whole crowd.
  *
- * Six of these are registered. They share a single CrowdSim, and each rebuilds
- * only its own instance matrices per frame.
+ * Six of these are added under one registered key. They share a single
+ * CrowdSim, and each rebuilds only its own instance matrices per frame.
  */
 export class CrowdPartDesc extends InstancedMeshDesc<
   BufferGeometry,
   MeshStandardMaterial,
   CrowdPartConfig
 > {
-  private cfg: CrowdPartConfig;
   private part: CrowdPart;
   private sim: CrowdSim;
-  private anchored = false;
 
   // Scratch objects, reused every frame: allocating per instance per frame
   // would churn thousands of objects a second.
@@ -450,8 +435,8 @@ export class CrowdPartDesc extends InstancedMeshDesc<
 
   constructor(view: ThreeView, ctx: ViewContext, config: CrowdPartConfig) {
     super(view, ctx, config);
-    this.cfg = config;
-    const desc = config.crowdPart as PartDescription;
+    const desc = config.crowdPart;
+    if (!desc) throw new Error(`"${CROWD_PART_KEY}" needs { sim, part }`);
     this.part = desc.part;
     this.sim = desc.sim;
   }
@@ -492,15 +477,6 @@ export class CrowdPartDesc extends InstancedMeshDesc<
     const mesh = this.raw;
     if (!mesh) return;
 
-    // Park the InstancedMesh at the anchor once. Instance matrices are local
-    // offsets from here, which is what keeps them inside float32's precision.
-    if (!this.anchored) {
-      mesh.position.copy(this.sim.anchorEcef);
-      mesh.quaternion.copy(this.sim.anchorQuat);
-      mesh.updateMatrix();
-      this.anchored = true;
-    }
-
     const { x: px, y: py, swingSign } = pivotFor(this.part);
     const isLimb = swingSign !== 0;
     const people = this.sim.people;
@@ -517,8 +493,9 @@ export class CrowdPartDesc extends InstancedMeshDesc<
         continue;
       }
 
-      // Model forward is +Z and heading 0 is north (+X), hence the quarter-turn.
-      this.qHeading.setFromAxisAngle(this.axisY, Math.PI / 2 - p.heading);
+      // Model forward is +Z, which is north in the West-Up-North frame; a
+      // compass heading (clockwise from north) is a negative turn about Y.
+      this.qHeading.setFromAxisAngle(this.axisY, -p.heading);
       this.vPos.set(p.localX, p.localY, p.localZ);
       this.vScale.setScalar(p.scale);
       this.mPerson.compose(this.vPos, this.qHeading, this.vScale);
@@ -555,28 +532,22 @@ export type InstancedCrowdHandles = {
  * Six draw calls, `options.count` people.
  */
 export function spawnInstancedCrowd(
-  view: ThreeView,
+  view: SceneView,
   options: CrowdSimOptions,
 ): InstancedCrowdHandles {
   if (!registered) {
-    for (const key of Object.values(PART_KEYS)) {
-      view.registerMesh(key, CrowdPartDesc);
-    }
+    view.registerMesh(CROWD_PART_KEY, CrowdPartDesc);
     registered = true;
   }
 
   const sim = new CrowdSim(options);
-  type AddArg = Parameters<ThreeView["addMesh"]>[0];
-  const handles = (Object.keys(PART_KEYS) as CrowdPart[]).map((part) => {
-    const config = {
-      [PART_KEYS[part]]: {},
-      crowdPart: { sim, part } satisfies PartDescription,
-    };
-    // Same type-level gap as before: `view` is generic over the default
-    // descriptions and does not know our custom keys. registerMesh above is
-    // what wires them up at runtime.
-    return view.addMesh<CrowdPartDesc>(config as unknown as AddArg);
-  });
+  const { anchor } = options;
+  const handles = CROWD_PARTS.map((part) =>
+    view.addMesh<CrowdPartDesc>({
+      crowdPart: { sim, part },
+      geodetic: { lat: anchor.lat, lng: anchor.lng, height: anchor.alt },
+    }),
+  );
 
   return {
     sim,

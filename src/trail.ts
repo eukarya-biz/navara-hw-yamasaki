@@ -5,11 +5,12 @@
 // is" into "look how big it is, and look how you moved through it" -- the
 // wandering, the backtracking and the dead ends are all in the line.
 //
-// Both the ribbon and the beams live in a local North-Up-East frame anchored at
-// one point, for the same reason the crowd does: `BufferGeometry` positions are
-// **float32**, and ECEF coordinates here are ~4,000,000 m, where float32 has
-// about 5 cm of resolution. A path built from raw ECEF would come out visibly
-// kinked and jittering. Local metre offsets round-trip with ~1e-5 m error.
+// The ribbon lives in a local West-Up-North frame (what `geodetic` builds)
+// anchored at its first point, for the same reason the crowd does:
+// `BufferGeometry` positions are **float32**, and ECEF coordinates here are
+// ~4,000,000 m, where float32 has about 5 cm of resolution. A path built from
+// raw ECEF would come out visibly kinked and jittering. Local metre offsets
+// round-trip with ~1e-5 m error. Each beam is its own `geodetic` placement.
 //
 // Nothing here is visible while walking. A 120 m beam of light standing over the
 // goal would both look wrong from inside a 3 m corridor and act as a giant
@@ -25,7 +26,6 @@ import {
   AdditiveBlending,
   CircleGeometry,
   DoubleSide,
-  Quaternion,
   Vector3,
 } from "three";
 import {
@@ -33,10 +33,10 @@ import {
   type ViewContext,
   type MeshConfig,
   type MeshUpdate,
-  geodeticToVector3,
-  northUpEastToFixedFrame,
+  type PassKey,
 } from "@navaramap/three";
 import type ThreeView from "@navaramap/three";
+import type { SceneView } from "./descriptions";
 
 import { metresPerDegree, type MetresPerDegree } from "./geo";
 
@@ -90,38 +90,27 @@ export class TrailRecorder {
 }
 
 // ---------------------------------------------------------------------------
-// Local frame shared by the ribbon and the markers
+// Local frame of the ribbon
 // ---------------------------------------------------------------------------
 
 export type LocalFrame = {
   anchor: TrailPoint;
-  ecef: Vector3;
-  quat: Quaternion;
   mPerDeg: MetresPerDegree;
 };
 
 export function makeLocalFrame(anchor: TrailPoint): LocalFrame {
-  // geodeticToVector3 takes degrees (navara >= 0.1.0).
-  const ecef = geodeticToVector3({
-    lat: anchor.lat,
-    lng: anchor.lng,
-    height: anchor.alt,
-  });
-  const m = northUpEastToFixedFrame(ecef);
-  return {
-    anchor,
-    ecef,
-    quat: new Quaternion().setFromRotationMatrix(m),
-    mPerDeg: metresPerDegree(anchor.lat),
-  };
+  return { anchor, mPerDeg: metresPerDegree(anchor.lat) };
 }
 
-/** Local offset in metres: (north, up, east) to match the NUE frame. */
+/**
+ * Local offset in metres: (west, up, north), the axes of the frame `geodetic`
+ * builds at the anchor.
+ */
 function toLocal(frame: LocalFrame, p: TrailPoint): Vector3 {
   return new Vector3(
-    (p.lat - frame.anchor.lat) * frame.mPerDeg.lat,
+    -(p.lng - frame.anchor.lng) * frame.mPerDeg.lng,
     p.alt - frame.anchor.alt,
-    (p.lng - frame.anchor.lng) * frame.mPerDeg.lng,
+    (p.lat - frame.anchor.lat) * frame.mPerDeg.lat,
   );
 }
 
@@ -156,6 +145,11 @@ export class TrailMeshDesc extends MeshDesc<TrailConfig, TrailUpdate, Group> {
   constructor(view: ThreeView, ctx: ViewContext, config: TrailConfig) {
     super(view, ctx, config);
     this.cfg = config;
+  }
+
+  /** A map overlay (additive, no depth): the transparent pass, not the G-buffer. */
+  protected getPassKey(): PassKey {
+    return "transparent";
   }
 
   createMesh(): Group {
@@ -238,8 +232,6 @@ export class TrailMeshDesc extends MeshDesc<TrailConfig, TrailUpdate, Group> {
     root.traverse((o) => {
       o.frustumCulled = false;
     });
-    root.position.copy(frame.ecef);
-    root.quaternion.copy(frame.quat);
     return root;
   }
 }
@@ -250,8 +242,6 @@ export class TrailMeshDesc extends MeshDesc<TrailConfig, TrailUpdate, Group> {
 
 type MarkerDescription = {
   trailMarker?: {
-    frame: LocalFrame;
-    at: TrailPoint;
     color: number;
     /** Beam height in metres. Tall enough to read from the aerial shot. */
     heightM: number;
@@ -268,11 +258,16 @@ export class TrailMarkerMeshDesc extends MeshDesc<
   Group
 > {
   private cfg: MarkerConfig;
-  private parts: Mesh[] = [];
+  private parts: Mesh<BufferGeometry, MeshBasicMaterial>[] = [];
 
   constructor(view: ThreeView, ctx: ViewContext, config: MarkerConfig) {
     super(view, ctx, config);
     this.cfg = config;
+  }
+
+  /** Same as the ribbon: an overlay, so the transparent pass. */
+  protected getPassKey(): PassKey {
+    return "transparent";
   }
 
   createMesh(): Group {
@@ -295,14 +290,13 @@ export class TrailMarkerMeshDesc extends MeshDesc<
         toneMapped: false,
       });
 
-    const local = toLocal(desc.frame, desc.at);
-
+    // Placed by `geodetic` at the marked point, so everything sits at the origin.
     // Core beam, plus a wider soft one so it reads as light rather than a pole.
     const core = new Mesh(
       new CylinderGeometry(1.6, 1.6, desc.heightM, 12, 1, true),
       mat(0.5),
     );
-    core.position.set(local.x, local.y + desc.heightM / 2, local.z);
+    core.position.y = desc.heightM / 2;
     root.add(core);
     this.parts.push(core);
 
@@ -316,7 +310,7 @@ export class TrailMarkerMeshDesc extends MeshDesc<
 
     const disc = new Mesh(new CircleGeometry(9, 32), mat(0.4));
     disc.rotation.x = -Math.PI / 2;
-    disc.position.set(local.x, local.y + 0.4, local.z);
+    disc.position.y = 0.4;
     root.add(disc);
     this.parts.push(disc);
 
@@ -324,8 +318,6 @@ export class TrailMarkerMeshDesc extends MeshDesc<
       o.frustumCulled = false;
       o.renderOrder = 998;
     });
-    root.position.copy(desc.frame.ecef);
-    root.quaternion.copy(desc.frame.quat);
     return root;
   }
 
@@ -334,7 +326,7 @@ export class TrailMarkerMeshDesc extends MeshDesc<
     const pulse = 0.8 + 0.2 * Math.sin((time / 1000) * ((2 * Math.PI) / 3));
     const base = [0.5, 0.16, 0.4];
     this.parts.forEach((p, i) => {
-      (p.material as MeshBasicMaterial).opacity = base[i] * pulse;
+      p.material.opacity = base[i] * pulse;
     });
   }
 }
@@ -356,7 +348,7 @@ export type TrailHandles = { remove: () => void };
  * starts; returns a handle so a replay can clear the previous one.
  */
 export function showTrail(
-  view: ThreeView,
+  view: SceneView,
   points: TrailPoint[],
   start: TrailPoint,
   goal: TrailPoint,
@@ -367,24 +359,21 @@ export function showTrail(
     registered = true;
   }
 
-  // Anchor everything to the first recorded point, so all local offsets stay
-  // within a few hundred metres.
-  const frame = makeLocalFrame(points[0] ?? start);
-  type AddArg = Parameters<ThreeView["addMesh"]>[0];
   const handles: { delete: () => void }[] = [];
 
   if (points.length >= 2) {
-    const trailConfig: TrailConfig = {
-      trail: {
-        frame,
-        points,
-        widthM: 4.5,
-        liftM: 0.5,
-        color: TRAIL_COLOR,
-      },
-    };
+    // Anchor the ribbon to its first point, so all local offsets stay within a
+    // few hundred metres.
+    const frame = makeLocalFrame(points[0]);
     handles.push(
-      view.addMesh<TrailMeshDesc>(trailConfig as unknown as AddArg),
+      view.addMesh<TrailMeshDesc>({
+        trail: { frame, points, widthM: 4.5, liftM: 0.5, color: TRAIL_COLOR },
+        geodetic: {
+          lat: frame.anchor.lat,
+          lng: frame.anchor.lng,
+          height: frame.anchor.alt,
+        },
+      }),
     );
   }
 
@@ -392,11 +381,11 @@ export function showTrail(
     [start, START_COLOR],
     [goal, GOAL_COLOR],
   ] as const) {
-    const markerConfig: MarkerConfig = {
-      trailMarker: { frame, at, color, heightM: 130 },
-    };
     handles.push(
-      view.addMesh<TrailMarkerMeshDesc>(markerConfig as unknown as AddArg),
+      view.addMesh<TrailMarkerMeshDesc>({
+        trailMarker: { color, heightM: 130 },
+        geodetic: { lat: at.lat, lng: at.lng, height: at.alt },
+      }),
     );
   }
 

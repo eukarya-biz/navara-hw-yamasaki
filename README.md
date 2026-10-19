@@ -181,6 +181,40 @@ view.attribution?.add([
 - `memoryStats().retainedTiles3d` は 0.2.1 では 0 のまま(ジオメトリは `featureCreated` で
   数えており HUD の「面」は増える)。HUD の「タイル」は目安にしない
 
+### navara-usage スキルに沿った整理(2026-10-19)
+
+バージョン更新・バグ修正とは別のコミットで、`navara-usage` スキルとの照合で出た項目を
+整理した。見た目と挙動は変えていない。
+
+1. **カスタムメッシュは `geodetic` で置く** — `goal.ts` / `trail.ts` / `crowd-instanced.ts` が
+   自前で `geodeticToVector3` + `northUpEastToFixedFrame` から root の位置と姿勢を組んでいたのを
+   やめ、`addMesh({ ..., geodetic: { lat, lng, height, heading } })` に統一。基底クラスが
+   West-Up-North フレームで `matrixWorld` を固定し、子は普通に動かせる。ローカル座標が
+   `(北, 上, 東)` から `(西, 上, 北)` に変わったので、軌跡の `toLocal`、群衆の `refreshLocal`、
+   向きの式(`π/2 - heading` → `-heading`)を合わせた(`matrixtest.mjs` も更新)。
+   親の向きは `geodetic.heading` で「来た方向を向く」ようにし、首振りは子の `rotation.y` で行う。
+2. **型付きの記述子語彙** — `src/descriptions.ts` の `SceneDescriptions`(既定 +
+   `goalParent` / `goalBeacon` / `trail` / `trailMarker` / `crowdPart`)で `ThreeView` を生成し、
+   `as unknown as AddArg` のキャストを全て削除。`registerMesh` は引き続き必要(実行時の結び付け)。
+3. **`addLight<AmbientLightDesc>`** — `@navaramap/three-default-descs` を直接依存に追加
+   (0.2.1、exact)。構造型 `AmbientHandle` へのキャストを削除。
+4. **描画パス** — 軌跡とマーカーは `getPassKey()` で transparent パスへ(加算合成の
+   オーバーレイなので G-buffer に入れない)。親のそばの光は **opaque のまま**:
+   transparent パスは壁と深度比較しないため、試すと 265 m 先から壁越しに光が見えた(実測)。
+5. **群衆の登録キーを 1 つに** — `crowdTorso` 〜 `crowdArmR` の 6 キーを `crowdPart` 1 つにし、
+   部位は config の `{ sim, part }` で渡す。
+6. **`src/crowd.ts` を削除** — 人型ビルダー `buildBlockPerson` だけ `src/block-person.ts` に移し、
+   親モデルと共有。
+7. **イベントとカメラ** — `view.on("layer", ...)` の種別分岐を `undergroundLayer.on("featureCreated", ...)`
+   に、終幕の画角計算は `view.camera.raw.fov` ではなく `view.camera.fov` を読む。
+
+検証(ヘッドレス Chrome、dev): 群衆アンカーと親 root の ECEF が WGS84 計算値と 0.00 m で一致、
+歩行中の群衆 25 体が進行方向を向く(内積 ≥ 0.9999)、START の床 24.96 m、
+「親のそばへ移動」→ 前進で再会 → 終幕カード(19 秒 / 3 m)まで通る。`tsc --noEmit`、`npm test` 9 件 OK。
+
+GOAL の位置(セルの四方 0.16〜0.24 m に壁。glb の三角形から実測)は、光の柱が壁に埋まっては
+いないので現状のままとした(2026-10-19 判断)。
+
 ### `vite.config.ts` の `optimizeDeps.exclude` は 0.2.1 でも必要
 
 下の「要検証」の答え。exclude を外して dev を起動すると、0.2.1 でも
@@ -546,8 +580,8 @@ x = Math.max(minAlt, Math.min(maxAlt, currentHeight + input))
 
 ## 群衆(インスタンシング版)
 
-実装は `src/crowd-instanced.ts`。旧版(`src/crowd.ts`、1人=6メッシュ)は親モデルの
-人型ビルダーを提供するために残してある。
+実装は `src/crowd-instanced.ts`。旧版(`src/crowd.ts`、1人=6メッシュ)は 2026-10-19 に削除し、
+人型ビルダー `buildBlockPerson` だけ `src/block-person.ts` に移して親モデルと共有している。
 
 ### なぜ書き直したか
 
@@ -586,8 +620,9 @@ transformなのでfloat64)、**各インスタンス行列はアンカーから�
 
 ### フレームの規約
 
-アンカーはNorth-Up-Eastフレームなので、ローカル `(x, y, z)` = `(北 m, 上 m, 東 m)`。
-モデルの正面は`+Z`、左右は`±X`。だから**ローカルX軸まわりの回転が手脚の前後スイング**になる。
+アンカーは `geodetic` で置くので West-Up-North フレーム。ローカル `(x, y, z)` = `(西 m, 上 m, 北 m)`。
+モデルの正面は`+Z`(= 北)で、方位 heading(北から時計回り)は Y 軸まわりの `-heading` 回転。
+左右は`±X`。だから**ローカルX軸まわりの回転が手脚の前後スイング**になる。
 
 `matrixtest.mjs` で検証済み:
 - 方位0/90/180/270°で、モデル正面が実際に北/東/南/西を向く
@@ -640,7 +675,8 @@ NavaraがG-buffer書き込み用にパッチするShaderLibマテリアルの一
 
 ## 群衆(試作・アセット不使用)
 
-外部キャラクターパックを使わず、コードだけで生成した群衆。実装は `src/crowd.ts`。
+外部キャラクターパックを使わず、コードだけで生成した群衆。実装は `src/crowd.ts` だった
+(2026-10-19 に削除。人型ビルダーは `src/block-person.ts` に残っている)。以下は当時の記録。
 
 - 見た目: Three.js の Box ジオメトリだけで組んだ簡易な人型(胴体・頭・腕2・脚2)。
   Kenney/Kay Lousbergパックの代わり。色をキャラごとに変えて「コピペ感」を軽減。
@@ -661,7 +697,7 @@ NavaraがG-buffer書き込み用にパッチするShaderLibマテリアルの一
 1. `geodeticToVector3` への `lat`/`lng` は「ラジアン」という型定義のコメントを
    信じて変換して渡している。もし全員が原点付近など明後日の位置に出るなら、
    度(degree)のまま渡す方に変えてみること(1行の修正で済む)。
-2. 進行方向(heading)からキャラの向きを求める式(`src/crowd.ts` 末尾のコメント参照)。
+2. 進行方向(heading)からキャラの向きを求める式。
    もし脚の振りと進んでいる方向がズレて見えるなら、符号を反転してみること
    — 位置・床追従のロジックとは独立しているので、ここだけ直せばよい。
 
@@ -673,7 +709,8 @@ NavaraがG-buffer書き込み用にパッチするShaderLibマテリアルの一
 そのため今回はコード生成の代替案(上記)に切り替えた。有料版が復活した場合、
 または他のCC0キャラクターパック(Kenney "Mini Characters" など)を使う場合は、
 GLTFへの変換(`assimp` または `FBX2glTF`)と `GLTFModelDesc` への差し替えが必要。
-`src/crowd.ts` の `CrowdPersonMeshDesc` を GLTF版に置き換える形になる想定。
+`src/block-person.ts` の `buildBlockPerson` と `src/crowd-instanced.ts` の部位ジオメトリを
+GLTF 版に置き換える形になる想定。
 
 
 

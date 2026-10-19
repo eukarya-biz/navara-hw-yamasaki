@@ -15,15 +15,16 @@ const local = 137.482;
 f32[0] = local;
 console.log(`  local offset  : ${local} -> float32 ${f32[0]}, error ${Math.abs(f32[0]-local).toExponential(2)} m  <-- fine`);
 
-// 2. Heading convention: model forward is +Z, heading 0 must face north (+X).
-console.log("\n=== heading: model +Z forward, frame X=north Y=up Z=east ===");
+// 2. Heading convention: model forward is +Z; in the West-Up-North frame that
+//    `geodetic` builds, heading 0 must face north (+Z) and 90 east (-X).
+console.log("\n=== heading: model +Z forward, frame X=west Y=up Z=north ===");
 const axisY = new Vector3(0, 1, 0);
 for (const [name, headingDeg] of [["north", 0], ["east", 90], ["south", 180], ["west", 270]]) {
   const h = headingDeg * Math.PI / 180;
-  const q = new Quaternion().setFromAxisAngle(axisY, Math.PI / 2 - h);
+  const q = new Quaternion().setFromAxisAngle(axisY, -h);
   const fwd = new Vector3(0, 0, 1).applyQuaternion(q); // model forward
-  // local (x,y,z) = (north, up, east)
-  const northComp = fwd.x, eastComp = fwd.z;
+  // local (x,y,z) = (west, up, north)
+  const northComp = fwd.z, eastComp = -fwd.x;
   const gotDeg = ((Math.atan2(eastComp, northComp) * 180 / Math.PI) + 360) % 360;
   const ok = Math.abs(gotDeg - headingDeg) < 0.001 || Math.abs(gotDeg - headingDeg - 360) < 0.001;
   console.log(`  heading ${String(headingDeg).padStart(3)}° (${name.padEnd(5)}) -> forward points ${gotDeg.toFixed(1)}°  ${ok ? "OK" : "MISMATCH"}`);

@@ -12,6 +12,7 @@
   },
   "dependencies": {
     "@navaramap/three": "0.2.1",
+    "@navaramap/three-default-descs": "0.2.1",
     "@navaramap/three-default-plugin": "0.2.1",
     "@navaramap/three-plugins": "0.2.1",
     "postprocessing": "6.39.4",

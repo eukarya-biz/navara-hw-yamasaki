@@ -1,8 +1,6 @@
 import ThreeView, { Color } from "@navaramap/three";
-import {
-  DefaultPlugin,
-  type DefaultDescriptions,
-} from "@navaramap/three-default-plugin";
+import { DefaultPlugin } from "@navaramap/three-default-plugin";
+import type { AmbientLightDesc } from "@navaramap/three-default-descs";
 import { PersonViewPlugin } from "@navaramap/three-plugins";
 import { Pane } from "tweakpane";
 import { WalkGrid, WalkerConstraint } from "./walkgrid";
@@ -12,6 +10,7 @@ import { CallAudio } from "./audio";
 import { showIntro, showEnding } from "./framing";
 import { TrailRecorder, showTrail, type TrailHandles } from "./trail";
 import { metresPerDegree } from "./geo";
+import type { SceneDescriptions } from "./descriptions";
 
 // ---------------------------------------------------------------------------
 // Facts measured from the tileset, not guessed.
@@ -170,7 +169,7 @@ async function main(): Promise<void> {
   }
 
   // --- view ---------------------------------------------------------------
-  const view = new ThreeView<DefaultDescriptions>({
+  const view = new ThreeView<SceneDescriptions>({
     container,
     animation: true,
     picking: false,
@@ -237,18 +236,10 @@ async function main(): Promise<void> {
   const EXPOSURE_BASE = 1.0;
   view.toneMappingExposure = EXPOSURE_BASE;
 
-  // addLight() accepts the ambient shape, but its return type is the base
-  // LightHandle, whose update() only knows about `position`. The concrete
-  // AmbientLightDesc type lives in @navaramap/three-default-descs, which is
-  // only a transitive dependency here -- importing across that boundary would
-  // couple us to a version we do not manage. A structural type for just the
-  // one call we make is enough, and keeps the dependency surface unchanged.
-  type AmbientHandle = {
-    update: (u: { ambient?: { intensity?: number } }) => void;
-  };
-  const ambientLight = view.addLight({
+  // Typed through the descriptor class, so update() knows the ambient shape.
+  const ambientLight = view.addLight<AmbientLightDesc>({
     ambient: { intensity: AMBIENT_BASE },
-  }) as unknown as AmbientHandle;
+  });
 
   // Ambient occlusion is what actually makes an unlit interior readable: it
   // darkens corners and recesses from geometry alone, no light required.
@@ -262,7 +253,7 @@ async function main(): Promise<void> {
   });
   // The converter wrote EPSG:6697, so these heights are orthometric -- the
   // same datum the walk grid was measured in. No geoid shift here.
-  view.addLayer({
+  const undergroundLayer = view.addLayer({
     type: "3d-tiles",
     source: undergroundSource,
     model: {
@@ -277,12 +268,12 @@ async function main(): Promise<void> {
   // Feature creation is the earliest sign the tileset parsed and produced
   // geometry, so count it.
   let features = 0;
-  view.on("layer", (kind, layerId, ..._rest) => {
-    if (kind === "featureCreated") {
-      features++;
-      if (features <= 3 || features % 200 === 0) {
-        console.info(`[layer] featureCreated #${features} (${layerId})`);
-      }
+  undergroundLayer.on("featureCreated", () => {
+    features++;
+    if (features <= 3 || features % 200 === 0) {
+      console.info(
+        `[layer] featureCreated #${features} (${undergroundLayer.id})`,
+      );
     }
   });
 
@@ -398,9 +389,10 @@ async function main(): Promise<void> {
    * frustum also means it still frames correctly in any window shape.
    */
   function framingDistanceM(): number {
-    const cam = view.camera.raw;
-    const vHalf = ((cam.fov ?? 50) / 2) * (Math.PI / 180);
-    const aspect = cam.aspect || 16 / 9;
+    // The wrapper exposes the vertical FOV in degrees; only the aspect has no
+    // getter, and reading it off `raw` is harmless (writing would not be).
+    const vHalf = ((view.camera.fov ?? 50) / 2) * DEG2RAD;
+    const aspect = view.camera.raw.aspect || 16 / 9;
     const hHalf = Math.atan(Math.tan(vHalf) * aspect);
     // Fit the diagonal, because the shot rotates and the extent presented to
     // the camera changes as it goes round.

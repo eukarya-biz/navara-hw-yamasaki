@@ -27,19 +27,15 @@ import {
   MeshBasicMaterial,
   AdditiveBlending,
   DoubleSide,
-  Quaternion,
-  Vector3,
 } from "three";
 import {
   MeshDesc,
-  type ViewContext,
   type MeshConfig,
   type MeshUpdate,
-  geodeticToVector3,
-  northUpEastToFixedFrame,
+  type MeshHandle,
 } from "@navaramap/three";
-import type ThreeView from "@navaramap/three";
-import { buildBlockPerson, type BlockPerson } from "./crowd";
+import { buildBlockPerson, type BlockPerson } from "./block-person";
+import type { SceneView } from "./descriptions";
 import { metresPerDegree } from "./geo";
 
 const DEG2RAD = Math.PI / 180;
@@ -79,62 +75,38 @@ const PARENT_SCALE = 1.15;
 
 const LIGHT_COLOR = 0xffe9c4;
 
-// ---------------------------------------------------------------------------
-// Shared placement helper
-// ---------------------------------------------------------------------------
-
-/** Degrees in (navara >= 0.1.0); ECEF metres out. */
-function ecefAt(lat: number, lng: number, height: number): Vector3 {
-  return geodeticToVector3({ lat, lng, height });
-}
-
-/**
- * North-Up-East frame at the goal, as a quaternion. Our meshes are built Y-up
- * like any Three.js object, so this is what stands them upright on the globe.
- */
-function frameQuatAt(lat: number, lng: number, height: number): Quaternion {
-  const origin = ecefAt(lat, lng, height);
-  const m = northUpEastToFixedFrame(origin);
-  return new Quaternion().setFromRotationMatrix(m);
-}
+// Placement: both meshes are added with `geodetic` (lat/lng in degrees, height
+// in metres), so the base class builds the upright West-Up-North frame and owns
+// the root transform. Children animate inside that frame as usual.
 
 // ---------------------------------------------------------------------------
 // The parent
 // ---------------------------------------------------------------------------
 
 type ParentDescription = {
-  goalParent?: { frameQuat: Quaternion };
+  goalParent?: Record<string, never>;
 };
 
 export type ParentConfig = MeshConfig & ParentDescription;
 export type ParentUpdate = MeshUpdate & ParentDescription;
 
 export class ParentMeshDesc extends MeshDesc<ParentConfig, ParentUpdate, Group> {
-  private cfg: ParentConfig;
   private person!: BlockPerson;
-
-  constructor(view: ThreeView, ctx: ViewContext, config: ParentConfig) {
-    super(view, ctx, config);
-    this.cfg = config;
-  }
 
   createMesh(): Group {
     this.person = buildBlockPerson(PARENT_COLOR, PARENT_SCALE);
+    // The root is placed by `geodetic`; the figure turns inside it.
     const root = new Group();
     root.add(this.person.group);
-    root.position.copy(ecefAt(GOAL.lat, GOAL.lng, GOAL.alt));
     return root;
   }
 
   update(time: number): void {
-    const desc = this.cfg.goalParent;
-    if (!desc || !this.raw) return;
-
+    if (!this.raw) return;
     // The parent is searching too: a slow look around, ±50° over ~7 s. Cheap,
     // but it stops the figure reading as a statue.
-    const sway = Math.sin((time / 1000) * ((2 * Math.PI) / 7)) * (50 * DEG2RAD);
-    const qLook = new Quaternion().setFromAxisAngle(new Vector3(0, 1, 0), sway);
-    this.raw.quaternion.copy(desc.frameQuat.clone().multiply(qLook));
+    this.person.group.rotation.y =
+      Math.sin((time / 1000) * ((2 * Math.PI) / 7)) * (50 * DEG2RAD);
   }
 }
 
@@ -143,7 +115,7 @@ export class ParentMeshDesc extends MeshDesc<ParentConfig, ParentUpdate, Group> 
 // ---------------------------------------------------------------------------
 
 type BeaconDescription = {
-  goalBeacon?: { frameQuat: Quaternion };
+  goalBeacon?: Record<string, never>;
 };
 
 export type BeaconConfig = MeshConfig & BeaconDescription;
@@ -157,15 +129,14 @@ export type BeaconUpdate = MeshUpdate & BeaconDescription;
  * out by tone mapping the way a weak point light would be.
  */
 export class BeaconMeshDesc extends MeshDesc<BeaconConfig, BeaconUpdate, Group> {
-  private cfg: BeaconConfig;
-  private core!: Mesh;
-  private halo!: Mesh;
-  private pool!: Mesh;
+  private core!: Mesh<CylinderGeometry, MeshBasicMaterial>;
+  private halo!: Mesh<CylinderGeometry, MeshBasicMaterial>;
+  private pool!: Mesh<CircleGeometry, MeshBasicMaterial>;
 
-  constructor(view: ThreeView, ctx: ViewContext, config: BeaconConfig) {
-    super(view, ctx, config);
-    this.cfg = config;
-  }
+  // Stays in the default (opaque) pass on purpose: the transparent pass does
+  // not depth-test against the walls, and this light is meant to be seen only
+  // once there is line of sight (measured: in the transparent pass it showed
+  // through the walls from 265 m away).
 
   createMesh(): Group {
     const root = new Group();
@@ -209,22 +180,16 @@ export class BeaconMeshDesc extends MeshDesc<BeaconConfig, BeaconUpdate, Group> 
     root.traverse((o) => {
       o.frustumCulled = false;
     });
-
-    root.position.copy(ecefAt(GOAL.lat, GOAL.lng, GOAL.alt));
     return root;
   }
 
   update(time: number): void {
-    const desc = this.cfg.goalBeacon;
-    if (!desc || !this.raw) return;
-
-    this.raw.quaternion.copy(desc.frameQuat);
-
+    if (!this.raw) return;
     // Slow breathing so it reads as light rather than a solid object.
     const pulse = 0.85 + 0.15 * Math.sin((time / 1000) * ((2 * Math.PI) / 4));
-    (this.core.material as MeshBasicMaterial).opacity = 0.3 * pulse;
-    (this.halo.material as MeshBasicMaterial).opacity = 0.12 * pulse;
-    (this.pool.material as MeshBasicMaterial).opacity = 0.22 * pulse;
+    this.core.material.opacity = 0.3 * pulse;
+    this.halo.material.opacity = 0.12 * pulse;
+    this.pool.material.opacity = 0.22 * pulse;
   }
 }
 
@@ -249,15 +214,15 @@ const RELIEF_MS = 1800;
 
 export class GoalController {
   private registered = false;
-  private parentHandle: ReturnType<ThreeView["addMesh"]> | null = null;
-  private beaconHandle: ReturnType<ThreeView["addMesh"]> | null = null;
+  private parentHandle: MeshHandle<ParentMeshDesc> | null = null;
+  private beaconHandle: MeshHandle<BeaconMeshDesc> | null = null;
 
   private phase: GoalPhase = "searching";
   private reunionStartMs: number | null = null;
   private lastDistanceM = Infinity;
 
   constructor(
-    private view: ThreeView,
+    private view: SceneView,
     private baseAmbient: number,
     private baseExposure: number,
     private callbacks: GoalCallbacks = {},
@@ -271,22 +236,21 @@ export class GoalController {
       this.registered = true;
     }
 
-    const frameQuat = frameQuatAt(GOAL.lat, GOAL.lng, GOAL.alt);
+    const at = { lat: GOAL.lat, lng: GOAL.lng, height: GOAL.alt };
 
-    const parentConfig: ParentConfig = { goalParent: { frameQuat } };
-    const beaconConfig: BeaconConfig = { goalBeacon: { frameQuat } };
-
-    // Same type-level gap as the crowd: `view` is generic over the default
-    // descriptions and does not know our custom mesh keys. registerMesh above
-    // is what wires them up at runtime; the config objects themselves are
-    // still fully checked against their own types.
-    type AddArg = Parameters<ThreeView["addMesh"]>[0];
-    this.parentHandle = this.view.addMesh<ParentMeshDesc>(
-      parentConfig as unknown as AddArg,
-    );
-    this.beaconHandle = this.view.addMesh<BeaconMeshDesc>(
-      beaconConfig as unknown as AddArg,
-    );
+    // `geodetic` stands both upright on the globe. The parent faces the way
+    // the player arrives and looks around from there; the beacon is round.
+    this.parentHandle = this.view.addMesh<ParentMeshDesc>({
+      goalParent: {},
+      geodetic: {
+        ...at,
+        heading: this.bearingFrom(GOAL_APPROACH.lat, GOAL_APPROACH.lng) + 180,
+      },
+    });
+    this.beaconHandle = this.view.addMesh<BeaconMeshDesc>({
+      goalBeacon: {},
+      geodetic: at,
+    });
 
     console.info(
       `[goal] parent placed at (${GOAL.lat}, ${GOAL.lng}) floor ${GOAL.alt} m`,
