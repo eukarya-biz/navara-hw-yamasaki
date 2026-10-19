@@ -51,10 +51,8 @@ import {
   northUpEastToFixedFrame,
 } from "@navaramap/three";
 import type ThreeView from "@navaramap/three";
+import { metresPerDegree, type MetresPerDegree } from "./geo";
 import type { WalkGrid, SurfacePair } from "./walkgrid";
-
-const DEG2RAD = Math.PI / 180;
-const M_PER_DEG_LAT = 110540;
 
 // --- body proportions, nominal (heightScale 1.0) ---------------------------
 // Same figures as the single-mesh version, which was checked against the child
@@ -170,12 +168,13 @@ export class CrowdSim {
   readonly people: Person[] = [];
   readonly anchorEcef: Vector3;
   readonly anchorQuat: Quaternion;
-  private mPerDegLng: number;
+  /** Degree-to-metre scale at the anchor; the area is small enough for one. */
+  private readonly mPerDeg: MetresPerDegree;
   private lastMs: number | null = null;
 
   constructor(private opts: CrowdSimOptions) {
     const a = opts.anchor;
-    this.mPerDegLng = M_PER_DEG_LAT * Math.cos(a.lat * DEG2RAD);
+    this.mPerDeg = metresPerDegree(a.lat);
 
     // geodeticToVector3 takes degrees (navara >= 0.1.0).
     this.anchorEcef = geodeticToVector3({
@@ -234,9 +233,9 @@ export class CrowdSim {
 
   private refreshLocal(p: Person): void {
     const a = this.opts.anchor;
-    p.localX = (p.lat - a.lat) * M_PER_DEG_LAT; // north
+    p.localX = (p.lat - a.lat) * this.mPerDeg.lat; // north
     p.localY = p.alt - a.alt; // up
-    p.localZ = (p.lng - a.lng) * this.mPerDegLng; // east
+    p.localZ = (p.lng - a.lng) * this.mPerDeg.lng; // east
   }
 
   /** Advance the simulation. Call once per frame, before the descriptors draw. */
@@ -246,11 +245,10 @@ export class CrowdSim {
     this.lastMs = nowMs;
 
     const player = this.opts.getPlayer();
-    const cosLat = Math.cos(player.lat * DEG2RAD);
 
     for (const p of this.people) {
-      const dN = (p.lat - player.lat) * M_PER_DEG_LAT;
-      const dE = (p.lng - player.lng) * M_PER_DEG_LAT * cosLat;
+      const dN = (p.lat - player.lat) * this.mPerDeg.lat;
+      const dE = (p.lng - player.lng) * this.mPerDeg.lng;
       p.distM = Math.hypot(dN, dE);
 
       // Recycle anyone who has fallen outside the local radius. They are moved
@@ -279,8 +277,8 @@ export class CrowdSim {
           else p.pauseUntilMs = nowMs + 1000;
         }
       } else {
-        const tN = (p.target.lat - p.lat) * M_PER_DEG_LAT;
-        const tE = (p.target.lng - p.lng) * this.mPerDegLng;
+        const tN = (p.target.lat - p.lat) * this.mPerDeg.lat;
+        const tE = (p.target.lng - p.lng) * this.mPerDeg.lng;
         const dist = Math.hypot(tN, tE);
         const stepLen = p.speed * dt;
 
@@ -319,9 +317,16 @@ export class CrowdSim {
       this.opts.localRadiusM,
     );
     if (cells.length === 0) return;
-    // Prefer a cell that is not already right on top of the player, so the
-    // crowd refills the distance rather than crowding the camera.
-    const cell = cells[Math.floor(Math.random() * cells.length)];
+    // Refill out of sight: a cell beyond the visible radius when there is one,
+    // so nobody pops into existence in front of the camera. (The comment used
+    // to promise this while the code picked any cell; measured pop-ins.)
+    const outOfSight = cells.filter((c) => {
+      const dN = (c.lat - player.lat) * this.mPerDeg.lat;
+      const dE = (c.lng - player.lng) * this.mPerDeg.lng;
+      return Math.hypot(dN, dE) > this.opts.visibleM;
+    });
+    const pool = outOfSight.length > 0 ? outOfSight : cells;
+    const cell = pool[Math.floor(Math.random() * pool.length)];
     p.lat = cell.lat;
     p.lng = cell.lng;
     p.alt = pickSurface(cell.surfaces, cell.surfaces[0][0]);

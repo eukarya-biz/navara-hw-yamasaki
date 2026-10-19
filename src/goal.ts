@@ -40,6 +40,7 @@ import {
 } from "@navaramap/three";
 import type ThreeView from "@navaramap/three";
 import { buildBlockPerson, type BlockPerson } from "./crowd";
+import { metresPerDegree } from "./geo";
 
 const DEG2RAD = Math.PI / 180;
 const RAD2DEG = 180 / Math.PI;
@@ -302,9 +303,8 @@ export class GoalController {
 
   /** Metres from the player to the parent, flat-earth (fine at this scale). */
   distanceFrom(lat: number, lng: number): number {
-    const dLat = (GOAL.lat - lat) * 110540;
-    const dLng = (GOAL.lng - lng) * 110540 * Math.cos(lat * DEG2RAD);
-    return Math.hypot(dLat, dLng);
+    const m = metresPerDegree(lat);
+    return Math.hypot((GOAL.lat - lat) * m.lat, (GOAL.lng - lng) * m.lng);
   }
 
   /**
@@ -312,9 +312,8 @@ export class GoalController {
    * increasing clockwise -- the same convention as PersonViewPlugin's heading.
    */
   bearingFrom(lat: number, lng: number): number {
-    const dLat = (GOAL.lat - lat) * 110540;
-    const dLng = (GOAL.lng - lng) * 110540 * Math.cos(lat * DEG2RAD);
-    return Math.atan2(dLng, dLat) * RAD2DEG;
+    const m = metresPerDegree(lat);
+    return Math.atan2((GOAL.lng - lng) * m.lng, (GOAL.lat - lat) * m.lat) * RAD2DEG;
   }
 
   /** Call once per frame from the main loop. */

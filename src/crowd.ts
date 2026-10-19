@@ -27,9 +27,9 @@ import {
   northUpEastToFixedFrame,
 } from "@navaramap/three";
 import type ThreeView from "@navaramap/three";
+import { metresPerDegree } from "./geo";
 import type { WalkGrid, SurfacePair } from "./walkgrid";
 
-const DEG2RAD = Math.PI / 180;
 
 // ---------------------------------------------------------------------------
 // Procedural low-poly person
@@ -230,11 +230,9 @@ export class CrowdPersonMeshDesc extends MeshDesc<
 
     // ---- LOD: skip work entirely for far-away instances ----
     const player = cfg.getPlayerLatLng();
-    const dLat = (this.state.lat - player.lat) * 110540;
-    const dLng =
-      (this.state.lng - player.lng) *
-      110540 *
-      Math.cos(player.lat * DEG2RAD);
+    const mp = metresPerDegree(player.lat);
+    const dLat = (this.state.lat - player.lat) * mp.lat;
+    const dLng = (this.state.lng - player.lng) * mp.lng;
     const distM = Math.hypot(dLat, dLng);
 
     const shouldBeVisible = distM < cfg.lod.visible;
@@ -270,11 +268,9 @@ export class CrowdPersonMeshDesc extends MeshDesc<
           }
         }
       } else {
-        const tLatM = (this.state.target.lat - this.state.lat) * 110540;
-        const tLngM =
-          (this.state.target.lng - this.state.lng) *
-          110540 *
-          Math.cos(this.state.lat * DEG2RAD);
+        const mt = metresPerDegree(this.state.lat);
+        const tLatM = (this.state.target.lat - this.state.lat) * mt.lat;
+        const tLngM = (this.state.target.lng - this.state.lng) * mt.lng;
         const distToTarget = Math.hypot(tLatM, tLngM);
         const step = this.state.speed * dt;
 

@@ -11,7 +11,7 @@ import { GOAL, GOAL_APPROACH, GoalController } from "./goal";
 import { CallAudio } from "./audio";
 import { showIntro, showEnding } from "./framing";
 import { TrailRecorder, showTrail, type TrailHandles } from "./trail";
-import type { MeshHandle } from "@navaramap/three";
+import { metresPerDegree } from "./geo";
 
 // ---------------------------------------------------------------------------
 // Facts measured from the tileset, not guessed.
@@ -387,6 +387,8 @@ async function main(): Promise<void> {
   // rather than guessed, so the shot frames the whole thing.
   //   南北 474 m / 東西 502 m / 対角 690 m, centre 35.6928566, 139.7008250
   const areaCenter = grid.bounds();
+  /** Degree-to-metre scale at the centre, for the orbit and bearings. */
+  const centreM = metresPerDegree(areaCenter.lat);
 
   /**
    * How far the camera has to be from the centre for the whole dataset to fit,
@@ -415,6 +417,8 @@ async function main(): Promise<void> {
 
   // --- goal: the parent, and the light that leads to them ------------------
   let searchStartedMs = performance.now();
+  /** When the parent was found; the ending card's "探していた時間" ends here. */
+  let reunionMs: number | null = null;
 
   // Insurance, off by default: an arrow pointing at the parent. The design
   // decision was to guide with light, because a permanent arrow dissolves the
@@ -435,6 +439,7 @@ async function main(): Promise<void> {
 
   const goal = new GoalController(view, AMBIENT_BASE, EXPOSURE_BASE, {
     onReunion: () => {
+      reunionMs = performance.now();
       audio.stopCalling();
       audio.playRelief();
       // The shot starts from wherever the player was standing, lifting away
@@ -455,8 +460,8 @@ async function main(): Promise<void> {
     cinematicDistanceM = framingDistanceM();
     const st = personView.getState();
     cinematicHeadingStart = Math.atan2(
-      (st.lng - areaCenter.lng) * areaCenter.mPerDegLng,
-      (st.lat - areaCenter.lat) * 110540,
+      (st.lng - areaCenter.lng) * centreM.lng,
+      (st.lat - areaCenter.lat) * centreM.lat,
     );
     constraint.enabled = false;
     bob.enabled = false;
@@ -538,16 +543,20 @@ async function main(): Promise<void> {
 
     const nowMs = performance.now();
 
+    // The closing shot moves the player along an orbit a few centimetres a
+    // frame; that is not walking, so neither the distance nor the bob count it.
+    const inCinematic = cinematicStartMs !== null && !cinematicDone;
+
     // How far the player moved since the last frame -- drives both the walked
     // distance shown at the end and whether the head bobs.
     let movedM = 0;
     if (lastPos) {
-      const dN = (s.lat - lastPos.lat) * 110540;
-      const dE =
-        (s.lng - lastPos.lng) * 110540 * Math.cos(s.lat * (Math.PI / 180));
+      const m = metresPerDegree(s.lat);
+      const dN = (s.lat - lastPos.lat) * m.lat;
+      const dE = (s.lng - lastPos.lng) * m.lng;
       movedM = Math.hypot(dN, dE);
       // Ignore teleports (debug buttons, level jumps) so the total stays honest.
-      if (movedM < 2) distanceWalkedM += movedM;
+      if (movedM < 2 && !inCinematic) distanceWalkedM += movedM;
       lastPos.lat = s.lat;
       lastPos.lng = s.lng;
     } else {
@@ -583,9 +592,8 @@ async function main(): Promise<void> {
 
       // Anchor position: on the orbit circle around the dataset centre. Only
       // altitude is clamped by the plugin, so moving lat/lng like this is fine.
-      const anchorLat = areaCenter.lat + (radius * Math.cos(theta)) / 110540;
-      const anchorLng =
-        areaCenter.lng + (radius * Math.sin(theta)) / areaCenter.mPerDegLng;
+      const anchorLat = areaCenter.lat + (radius * Math.cos(theta)) / centreM.lat;
+      const anchorLng = areaCenter.lng + (radius * Math.sin(theta)) / centreM.lng;
       // Face the centre: the bearing from a point on the circle back to the
       // middle is its own angle plus half a turn. theta is radians for the
       // trigonometry above; the plugin takes degrees.
@@ -611,7 +619,7 @@ async function main(): Promise<void> {
         pitch = cine.pitchDeg;
         showEnding(
           {
-            elapsedSec: (performance.now() - searchStartedMs) / 1000,
+            elapsedSec: ((reunionMs ?? performance.now()) - searchStartedMs) / 1000,
             distanceM: distanceWalkedM,
             walkableAreaM2: grid.cellCount * 4, // 2 m grid
             longestPathM: LONGEST_PATH_M,
@@ -666,8 +674,6 @@ async function main(): Promise<void> {
     }
 
     const surf = constraint.lastSurface;
-    const mem = view.memoryStats();
-    const tiles = mem?.retainedTiles3d ?? -1;
     hud.textContent =
       `lat  ${s.lat.toFixed(6)}\n` +
       `lng  ${s.lng.toFixed(6)}\n` +
@@ -685,8 +691,7 @@ async function main(): Promise<void> {
       (surf
         ? `床   ${surf.floor.toFixed(2)} m / 天井 ${surf.ceiling.toFixed(2)} m\n`
         : "床   なし\n") +
-      `タイル ${tiles === -1 ? "?" : tiles} / 面 ${features}` +
-      `${tiles === 0 && features === 0 ? "  ← 読込0件" : ""}\n` +
+      `面 ${features}${features === 0 ? "  ← 読込0件" : ""}\n` +
       `補正 ${corrections}\n` +
       `群衆 ${crowd?.sim.visibleCount() ?? 0}/${crowdParams.count} 表示中\n` +
       `親まで ${goal.distanceM.toFixed(0)} m` +
@@ -748,9 +753,7 @@ async function main(): Promise<void> {
   }
 
   const fCrowd = pane.addFolder({ title: "群衆(試作)", expanded: false });
-  fCrowd
-    .addBinding(crowdParams, "count", { label: "人数", min: 0, max: 1500, step: 50 })
-    .on("change", () => {});
+  fCrowd.addBinding(crowdParams, "count", { label: "人数", min: 0, max: 1500, step: 50 });
   fCrowd.addButton({ title: "配置し直す" }).on("click", () => respawnCrowd());
 
   const fFeel = pane.addFolder({ title: "歩きの感触", expanded: false });
@@ -856,6 +859,7 @@ async function main(): Promise<void> {
     goal.reset();
     audio.startCalling();
     searchStartedMs = performance.now();
+    reunionMs = null;
     distanceWalkedM = 0;
   });
 

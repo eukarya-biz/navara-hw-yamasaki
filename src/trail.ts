@@ -38,8 +38,8 @@ import {
 } from "@navaramap/three";
 import type ThreeView from "@navaramap/three";
 
-const DEG2RAD = Math.PI / 180;
-const M_PER_DEG_LAT = 110540;
+import { metresPerDegree, type MetresPerDegree } from "./geo";
+
 
 export type TrailPoint = { lat: number; lng: number; alt: number };
 
@@ -72,8 +72,9 @@ export class TrailRecorder {
     if (!this.recording || this.points.length >= this.maxPoints) return;
     const last = this.points[this.points.length - 1];
     if (last) {
-      const dN = (lat - last.lat) * M_PER_DEG_LAT;
-      const dE = (lng - last.lng) * M_PER_DEG_LAT * Math.cos(lat * DEG2RAD);
+      const m = metresPerDegree(lat);
+      const dN = (lat - last.lat) * m.lat;
+      const dE = (lng - last.lng) * m.lng;
       const dU = alt - last.alt;
       const moved = Math.hypot(dN, dE, dU);
       if (moved < this.spacingM) return;
@@ -96,7 +97,7 @@ export type LocalFrame = {
   anchor: TrailPoint;
   ecef: Vector3;
   quat: Quaternion;
-  mPerDegLng: number;
+  mPerDeg: MetresPerDegree;
 };
 
 export function makeLocalFrame(anchor: TrailPoint): LocalFrame {
@@ -111,16 +112,16 @@ export function makeLocalFrame(anchor: TrailPoint): LocalFrame {
     anchor,
     ecef,
     quat: new Quaternion().setFromRotationMatrix(m),
-    mPerDegLng: M_PER_DEG_LAT * Math.cos(anchor.lat * DEG2RAD),
+    mPerDeg: metresPerDegree(anchor.lat),
   };
 }
 
 /** Local offset in metres: (north, up, east) to match the NUE frame. */
 function toLocal(frame: LocalFrame, p: TrailPoint): Vector3 {
   return new Vector3(
-    (p.lat - frame.anchor.lat) * M_PER_DEG_LAT,
+    (p.lat - frame.anchor.lat) * frame.mPerDeg.lat,
     p.alt - frame.anchor.alt,
-    (p.lng - frame.anchor.lng) * frame.mPerDegLng,
+    (p.lng - frame.anchor.lng) * frame.mPerDeg.lng,
   );
 }
 
