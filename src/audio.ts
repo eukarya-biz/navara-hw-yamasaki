@@ -394,8 +394,9 @@ export class CallAudio {
     if (this.nextBabbleMs < nowMs) this.nextBabbleMs = nowMs;
   }
 
-  setListener(lat: number, lng: number, heading: number): void {
-    this.listener = { lat, lng, heading };
+  /** Heading in degrees (0 = north, clockwise), as PersonViewPlugin reports it. */
+  setListener(lat: number, lng: number, headingDeg: number): void {
+    this.listener = { lat, lng, heading: headingDeg * (Math.PI / 180) };
   }
 
   setSource(lat: number, lng: number): void {

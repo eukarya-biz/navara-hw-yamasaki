@@ -29,7 +29,6 @@ import {
   DoubleSide,
   Quaternion,
   Vector3,
-  type Matrix4,
 } from "three";
 import {
   MeshDesc,
@@ -43,6 +42,7 @@ import type ThreeView from "@navaramap/three";
 import { buildBlockPerson, type BlockPerson } from "./crowd";
 
 const DEG2RAD = Math.PI / 180;
+const RAD2DEG = 180 / Math.PI;
 
 /** Measured -- see the note at the top of this file. */
 export const GOAL = {
@@ -82,12 +82,9 @@ const LIGHT_COLOR = 0xffe9c4;
 // Shared placement helper
 // ---------------------------------------------------------------------------
 
+/** Degrees in (navara >= 0.1.0); ECEF metres out. */
 function ecefAt(lat: number, lng: number, height: number): Vector3 {
-  return geodeticToVector3({
-    lat: lat * DEG2RAD,
-    lng: lng * DEG2RAD,
-    height,
-  } as never) as unknown as Vector3;
+  return geodeticToVector3({ lat, lng, height });
 }
 
 /**
@@ -96,7 +93,7 @@ function ecefAt(lat: number, lng: number, height: number): Vector3 {
  */
 function frameQuatAt(lat: number, lng: number, height: number): Quaternion {
   const origin = ecefAt(lat, lng, height);
-  const m = northUpEastToFixedFrame(origin) as unknown as Matrix4;
+  const m = northUpEastToFixedFrame(origin);
   return new Quaternion().setFromRotationMatrix(m);
 }
 
@@ -310,11 +307,14 @@ export class GoalController {
     return Math.hypot(dLat, dLng);
   }
 
-  /** Compass bearing from the player to the parent, radians, 0 = north. */
+  /**
+   * Compass bearing from the player to the parent in degrees, 0 = north,
+   * increasing clockwise -- the same convention as PersonViewPlugin's heading.
+   */
   bearingFrom(lat: number, lng: number): number {
     const dLat = (GOAL.lat - lat) * 110540;
     const dLng = (GOAL.lng - lng) * 110540 * Math.cos(lat * DEG2RAD);
-    return Math.atan2(dLng, dLat);
+    return Math.atan2(dLng, dLat) * RAD2DEG;
   }
 
   /** Call once per frame from the main loop. */

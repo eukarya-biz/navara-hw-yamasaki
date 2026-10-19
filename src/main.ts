@@ -2,8 +2,8 @@ import ThreeView, { Color } from "@navaramap/three";
 import {
   DefaultPlugin,
   type DefaultDescriptions,
-} from "@navaramap/three_default_plugin";
-import { PersonViewPlugin } from "@navaramap/three_plugins";
+} from "@navaramap/three-default-plugin";
+import { PersonViewPlugin } from "@navaramap/three-plugins";
 import { Pane } from "tweakpane";
 import { WalkGrid, WalkerConstraint } from "./walkgrid";
 import { spawnInstancedCrowd, type InstancedCrowdHandles } from "./crowd-instanced";
@@ -64,6 +64,11 @@ const UNDERGROUND_TILESET = new URL(
   location.href,
 ).href;
 const WALK_GRID = "data/ubld_walkgrid.json";
+
+// PersonViewPlugin's public heading/pitch API is in degrees (navara >= 0.1.0);
+// the trigonometry for the closing shot still wants radians.
+const DEG2RAD = Math.PI / 180;
+const RAD2DEG = 180 / Math.PI;
 
 /** Child's eye line. This is the whole point of the project. */
 // A 4-year-old. Children get lost most between 2 and 5 -- roughly 80% of cases
@@ -234,7 +239,7 @@ async function main(): Promise<void> {
 
   // addLight() accepts the ambient shape, but its return type is the base
   // LightHandle, whose update() only knows about `position`. The concrete
-  // AmbientLightDesc type lives in @navaramap/three_default_descs, which is
+  // AmbientLightDesc type lives in @navaramap/three-default-descs, which is
   // only a transitive dependency here -- importing across that boundary would
   // couple us to a version we do not manage. A structural type for just the
   // one call we make is enough, and keeps the dependency surface unchanged.
@@ -249,13 +254,17 @@ async function main(): Promise<void> {
   // darkens corners and recesses from geometry alone, no light required.
   view.addEffect({ ssao: { intensity: 2.0, radius: 0.05 } });
 
-  const undergroundLayer = view.addLayer({
-    type: "cesium3dtiles",
-    // The converter wrote EPSG:6697, so these heights are orthometric -- the
-    // same datum the walk grid was measured in. No geoid shift here.
+  const undergroundSource = view.addSource({
+    type: "3d-tiles",
     // IMPORTANT: this URL must be fully-qualified (see UNDERGROUND_TILESET
     // above) -- a root-relative path silently loads nothing.
-    data: { url: UNDERGROUND_TILESET },
+    url: UNDERGROUND_TILESET,
+  });
+  // The converter wrote EPSG:6697, so these heights are orthometric -- the
+  // same datum the walk grid was measured in. No geoid shift here.
+  view.addLayer({
+    type: "3d-tiles",
+    source: undergroundSource,
     model: {
       show: true,
       height: 0,
@@ -486,19 +495,27 @@ async function main(): Promise<void> {
 
   // --- mouse look ---------------------------------------------------------
   // PersonViewPlugin has no mouse look, but setHeading/setFpvPitch are public,
-  // so pointer lock can drive them directly.
-  const MAX_PITCH = (85 * Math.PI) / 180;
+  // so pointer lock can drive them directly. Both take degrees; the sensitivity
+  // is the previous 0.0022 rad/px expressed in degrees, so the feel is unchanged.
+  const LOOK_DEG_PER_PX = 0.0022 * RAD2DEG;
+  const MAX_PITCH_DEG = 85;
+  /** Downward FPV pitch in degrees. Positive looks down. */
   let pitch = 0;
   container.addEventListener("click", () => {
     if (document.pointerLockElement !== container) container.requestPointerLock();
   });
   document.addEventListener("mousemove", (e) => {
     if (document.pointerLockElement !== container) return;
-    personView.setHeading(personView.getHeading() + e.movementX * 0.0022);
+    personView.setHeading(
+      personView.getHeading() + e.movementX * LOOK_DEG_PER_PX,
+    );
     // Positive fpvPitch tilts the view down, so invert movementY.
     // The cinematic owns the pitch while it runs.
     if (cinematicStartMs !== null && !cinematicDone) return;
-    pitch = Math.max(-MAX_PITCH, Math.min(MAX_PITCH, pitch + e.movementY * 0.0022));
+    pitch = Math.max(
+      -MAX_PITCH_DEG,
+      Math.min(MAX_PITCH_DEG, pitch + e.movementY * LOOK_DEG_PER_PX),
+    );
     personView.setFpvPitch(pitch);
   });
 
@@ -554,15 +571,14 @@ async function main(): Promise<void> {
       // Ease the turn at both ends so it does not start or stop abruptly.
       const turn = 0.5 - Math.cos(Math.PI * t) / 2;
 
-      const pitchTarget = (cine.pitchDeg * Math.PI) / 180;
-      const pitchNow = pitch + (pitchTarget - pitch) * rise;
-      const theta =
-        cinematicHeadingStart + ((cine.orbitDeg * Math.PI) / 180) * turn;
+      const pitchTargetRad = cine.pitchDeg * DEG2RAD;
+      const pitchNow = pitch + (cine.pitchDeg - pitch) * rise;
+      const theta = cinematicHeadingStart + cine.orbitDeg * DEG2RAD * turn;
 
       // Decompose the framing distance into height and ground radius at the
       // look-down angle, so the camera ends up on a cone around the centre.
-      const targetH = cinematicDistanceM * Math.sin(pitchTarget);
-      const targetR = cinematicDistanceM * Math.cos(pitchTarget);
+      const targetH = cinematicDistanceM * Math.sin(pitchTargetRad);
+      const targetR = cinematicDistanceM * Math.cos(pitchTargetRad);
       const radius = targetR * rise;
 
       // Anchor position: on the orbit circle around the dataset centre. Only
@@ -571,12 +587,13 @@ async function main(): Promise<void> {
       const anchorLng =
         areaCenter.lng + (radius * Math.sin(theta)) / areaCenter.mPerDegLng;
       // Face the centre: the bearing from a point on the circle back to the
-      // middle is its own angle plus half a turn.
+      // middle is its own angle plus half a turn. theta is radians for the
+      // trigonometry above; the plugin takes degrees.
       personView.teleport({
         lat: anchorLat,
         lng: anchorLng,
         alt: START.alt,
-        heading: theta + Math.PI,
+        heading: theta * RAD2DEG + 180,
       });
 
       // Camera height is `clampedAlt + fpvHeightOffset`, and only the offset is
@@ -591,7 +608,7 @@ async function main(): Promise<void> {
         cinematicDone = true;
         // Hand the pitch back where the cinematic left it, so the first mouse
         // movement afterwards does not snap the view back to horizontal.
-        pitch = (cine.pitchDeg * Math.PI) / 180;
+        pitch = cine.pitchDeg;
         showEnding(
           {
             elapsedSec: (performance.now() - searchStartedMs) / 1000,
@@ -637,7 +654,7 @@ async function main(): Promise<void> {
     goal.update(s.lat, s.lng, nowMs);
     if (hintArrow.style.display !== "none") {
       const rel = goal.bearingFrom(s.lat, s.lng) - s.heading;
-      hintArrow.style.transform = `rotate(${(rel * 180) / Math.PI}deg)`;
+      hintArrow.style.transform = `rotate(${rel}deg)`;
     }
     audio.setListener(s.lat, s.lng, s.heading);
     audio.update(nowMs);
@@ -656,7 +673,7 @@ async function main(): Promise<void> {
       `lng  ${s.lng.toFixed(6)}\n` +
       `alt  ${s.alt.toFixed(2)} m (標高)\n` +
       `視線 ${(s.alt + personView.getFpvHeightOffset()).toFixed(2)} m\n` +
-      `向き ${(((((s.heading * 180) / Math.PI) % 360) + 360) % 360).toFixed(0)}°\n` +
+      `向き ${(((s.heading % 360) + 360) % 360).toFixed(0)}°\n` +
       `状態 ${
         {
           floor: "床の上",
@@ -887,7 +904,7 @@ async function main(): Promise<void> {
         heading: 0,
       });
       personView.setFpvHeightOffset(200);
-      pitch = (55 * Math.PI) / 180; // positive pitch looks down
+      pitch = 55; // degrees; positive pitch looks down
       personView.setFpvPitch(pitch);
       pane.refresh();
     });

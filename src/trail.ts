@@ -25,7 +25,6 @@ import {
   AdditiveBlending,
   CircleGeometry,
   DoubleSide,
-  Matrix4,
   Quaternion,
   Vector3,
 } from "three";
@@ -101,12 +100,13 @@ export type LocalFrame = {
 };
 
 export function makeLocalFrame(anchor: TrailPoint): LocalFrame {
+  // geodeticToVector3 takes degrees (navara >= 0.1.0).
   const ecef = geodeticToVector3({
-    lat: anchor.lat * DEG2RAD,
-    lng: anchor.lng * DEG2RAD,
+    lat: anchor.lat,
+    lng: anchor.lng,
     height: anchor.alt,
-  } as never) as unknown as Vector3;
-  const m = northUpEastToFixedFrame(ecef) as unknown as Matrix4;
+  });
+  const m = northUpEastToFixedFrame(ecef);
   return {
     anchor,
     ecef,

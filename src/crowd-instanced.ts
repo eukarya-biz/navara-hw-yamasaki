@@ -177,13 +177,14 @@ export class CrowdSim {
     const a = opts.anchor;
     this.mPerDegLng = M_PER_DEG_LAT * Math.cos(a.lat * DEG2RAD);
 
+    // geodeticToVector3 takes degrees (navara >= 0.1.0).
     this.anchorEcef = geodeticToVector3({
-      lat: a.lat * DEG2RAD,
-      lng: a.lng * DEG2RAD,
+      lat: a.lat,
+      lng: a.lng,
       height: a.alt,
-    } as never) as unknown as Vector3;
+    });
 
-    const m = northUpEastToFixedFrame(this.anchorEcef) as unknown as Matrix4;
+    const m = northUpEastToFixedFrame(this.anchorEcef);
     this.anchorQuat = new Quaternion().setFromRotationMatrix(m);
 
     this.populate();

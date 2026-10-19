@@ -25,7 +25,11 @@ npm run dev
 
 ## このシーンの前提
 
-`PersonViewPlugin` 0.0.2 には**重力もコリジョンも無い**。垂直方向の処理は
+`PersonViewPlugin` には **3D Tiles に対する重力もコリジョンも無い**。0.2.1 には
+`collision` オプション(`"off" | "clamp" | "ground"`)があるが、これは
+`view.sampleTerrainHeight()` で**地形ソース(quantized-mesh / raster-dem)の高さ**を
+引く仕組みで、地形レイヤーを読まないこのシーンでは高さが返らず何も起きない。
+地下街の床は 3D Tiles のジオメトリなので対象外。既定(`collision` off)の垂直方向の処理は
 `alt += dirZ * altSpeed * dt` を `[minAlt, maxAlt]` でクランプするだけで、
 床を検出する処理は存在しない。デフォルトの `altSpeed` は 30 m/s なので、
 高さ約 3 m の通路では下降キーを 0.33 秒押しただけでデータの外に出てしまう。
@@ -62,9 +66,10 @@ npm test            # 移動ロジックと到達性の検証
 `simtest.mjs` は PersonViewPlugin の移動モデルを再現して床追従を検証する。
 `reachtest.mjs` は開始地点から塗りつぶし探索して、地下街が連結していることを確認する。
 
-**未検証**: 描画そのものは目視確認していない。作成環境でヘッドレスブラウザが
-入手できなかったため、型チェック・ビルド・アセット配信・移動ロジックまでしか
-確認できていない。見た目(明るさ、SSAO の効き、色)は実機での調整が必要。
+**描画の確認**: ローカルの Chrome をヘッドレスで起動し(`puppeteer-core` は
+devDependencies にある)、dev / preview の両方で「はじめる」→ 親のそばへ移動 → 前進で再会 →
+終幕カードまでを自動操作で通し、スクリーンショットで通路・群衆・光の筋・終幕のマーカーの描画を確認した
+(2026-10-15、navaramap 0.2.1)。見た目(明るさ、SSAO の効き、色)の調整は引き続き実機での判断が必要。
 
 ## グリッドの再生成
 
@@ -128,7 +133,51 @@ view.attribution?.add([
 
 `defaultAttribution: false` でオプトアウトできる。Worker内では `undefined` になるので `?.` が必要。
 
-## 公式テンプレートとの構成差(2026-07-30 調査)
+## navaramap 0.2.1 への更新(2026-10-15)
+
+`@navaramap/three` / `three-default-plugin` / `three-plugins` を 0.0.2 → **0.2.1**
+(npm の latest)に上げた。`npm install --save-exact` で固定している。
+
+### API の差分(0.0.2 → 0.2.1)のうち、このシーンに影響したもの
+
+| 項目 | 0.0.2 | 0.2.1 | 対応 |
+|---|---|---|---|
+| パッケージ名 | `three_plugins`(アンダースコア) | **`three-plugins`**(ハイフン、0.0.4〜) | import と `optimizeDeps.exclude` を書き換え |
+| heading / pitch の単位 | ラジアン | **度**(0.1.0〜。`setHeading` / `setFpvPitch` / `teleport({heading})` / `getState().heading` / `startHeading` 全て) | マウス感度・終幕の軌道計算・HUD・`bearingFrom()`・音の定位を度に統一 |
+| 3D Tiles の追加 | `addLayer({type:"cesium3dtiles", data:{url}})` | **`addSource({type:"3d-tiles", url})` + `addLayer({type:"3d-tiles", source})`**(0.0.6〜) | `main.ts` を書き換え。`model` の `show/height/color/maxSse` はそのまま |
+| WASM の配置 | `dist/*.wasm` | **`dist/assets/*.wasm`** | `vite.config.ts` の `dist/*.wasm` コピー指定を削除(空振りするとビルドが落ちる) |
+| `geodeticToVector3` の単位 | ラジアン(WASM の `LLE` 型。`as never` で型を消して渡していた) | **度**(0.1.0〜。`LatLngHeight` を受け、three の `Vector3` を返す) | `goal.ts` / `trail.ts` / `crowd-instanced.ts` / `crowd.ts` の `* DEG2RAD` と型キャストを削除。放置すると群衆・親・光の筋・軌跡が約 11,000 km 離れたギニア湾沖に置かれる(実測。HUD の数値は lat/lng 計算なので正常に見える) |
+
+変わらなかったもの: `rotationSpeed` は 0.0.2 から deg/frame。`startLat/startLng/startHeight`、
+`fpvHeightOffset`(クランプされない)、`minAlt/maxAlt` の毎フレームクランプ、
+`view.globe.hideUnderground`、`view.attribution`、`registerMesh` / `addMesh`、
+`MeshDesc` / `InstancedMeshDesc` のジェネリクス、`northUpEastToFixedFrame`。
+カスタム記述子(`crowd-instanced.ts` / `crowd.ts` / `trail.ts` / `goal.ts` の記述子部分)は
+無変更で型が通ったが、**型が通ることと位置が合うことは別**だった。`geodeticToVector3` の
+単位変更は `as never` で型を消していたため検出されず、群衆アンカーの ECEF を実測して初めて発覚した。
+0.2.0 の BREAKING は selective bloom のみで、ここでは使っていない。
+
+### 検証結果(ヘッドレス Chrome、dev / preview 両方)
+
+- 群衆アンカーの ECEF が START の WGS84 計算値と 0.00 m で一致。START で群衆が見え、
+  親のそばで光の筋が床の光だまりごと見え、終幕で開始地点のビームが見える
+- HUD の「群衆 N/500 表示中」はシミュレーション上の距離で数えているので、
+  **描画位置のバグは HUD では検出できない**。メッシュの位置はスクリーンショットで見ること
+- START の床 24.96 m / 天井 28.16 m、目線 1.0 m(更新前と同じ)
+- `setHeading(90)` → `getHeading()` / `getState().heading` とも 90、`setFpvPitch(30)` → 30
+- 「親のそばへ移動」で 38.50 m 層に着地、親まで 6 m。前進で再会 → 終幕カード表示
+- WASM / EXR のロードエラーなし(404 は favicon のみ)
+- `memoryStats().retainedTiles3d` は 0.2.1 では 0 のまま(ジオメトリは `featureCreated` で
+  数えており HUD の「面」は増える)。HUD の「タイル」は目安にしない
+
+### `vite.config.ts` の `optimizeDeps.exclude` は 0.2.1 でも必要
+
+下の「要検証」の答え。exclude を外して dev を起動すると、0.2.1 でも
+`WebAssembly.instantiate(): expected magic word 00 61 73 6d, found 3c 21 64 6f`
+(SPA フォールバックの `<!do`)で止まる(2026-10-15 実測、vite 5.4.20 + npm)。
+公式テンプレートが設定なしで動くのは pnpm の node_modules 構造の違いで、navara 側の修正ではない。
+
+## 公式テンプレートとの構成差(2026-07-30 調査・0.0.2 当時の記録)
 
 `reearth/navara-template` を実際にクローンして比較した結果:
 

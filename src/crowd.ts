@@ -314,10 +314,10 @@ export class CrowdPersonMeshDesc extends MeshDesc<
     // ---- placement: ECEF position + NUE-frame heading ----
     try {
       const origin = geodeticToVector3({
-        lat: this.state.lat * DEG2RAD,
-        lng: this.state.lng * DEG2RAD,
+        lat: this.state.lat,
+        lng: this.state.lng,
         height: this.state.alt,
-      } as never);
+      });
 
       // Heading rotation inside the NUE frame (X=north, Y=up, Z=east): the
       // model's own local +Z is its "forward". See file header for the
@@ -328,7 +328,7 @@ export class CrowdPersonMeshDesc extends MeshDesc<
       );
       const qFinal = cfg.frameQuat.clone().multiply(qHeading);
 
-      this.raw.position.copy(origin as unknown as Vector3);
+      this.raw.position.copy(origin);
       this.raw.quaternion.copy(qFinal);
 
       if (this.debugId === 0 && CrowdPersonMeshDesc.debugFramesLeft > 0) {
@@ -409,15 +409,15 @@ export function spawnCrowd(
   // North-Up-East frame for every instance is visually indistinguishable
   // from computing it per-character, and far cheaper.
   const originForFrame = geodeticToVector3({
-    lat: options.center.lat * DEG2RAD,
-    lng: options.center.lng * DEG2RAD,
+    lat: options.center.lat,
+    lng: options.center.lng,
     height: 25,
-  } as never);
+  });
   console.info(
-    `[crowd] shared frame origin (ECEF): (${(originForFrame as unknown as Vector3).x?.toFixed(1)}, ` +
-      `${(originForFrame as unknown as Vector3).y?.toFixed(1)}, ${(originForFrame as unknown as Vector3).z?.toFixed(1)})`,
+    `[crowd] shared frame origin (ECEF): (${originForFrame.x.toFixed(1)}, ` +
+      `${originForFrame.y.toFixed(1)}, ${originForFrame.z.toFixed(1)})`,
   );
-  const frameMatrix = northUpEastToFixedFrame(originForFrame as unknown as Vector3);
+  const frameMatrix = northUpEastToFixedFrame(originForFrame);
   const frameQuat = new Quaternion().setFromRotationMatrix(frameMatrix);
 
   const handles: ReturnType<ThreeView["addMesh"]>[] = [];
@@ -459,9 +459,9 @@ export function spawnCrowd(
 // Known unknowns -- check these first if the crowd looks wrong on screen
 // ---------------------------------------------------------------------------
 //
-// 1. geodeticToVector3's doc comment says lat/lng in *radians*; that's what
-//    this file converts to before calling it. If everyone renders at the
-//    wrong spot (or the origin), try passing degrees instead -- one line.
+// 1. geodeticToVector3 takes lat/lng in *degrees* (navara >= 0.1.0). It took
+//    radians in 0.0.2, and converting to radians after the upgrade put every
+//    custom mesh 11,000 km away -- measured, not hypothetical.
 //
 // 2. Heading: derived as "model's local +Z is forward, rotate by
 //    PI/2 - heading inside the NUE frame". If people walk sideways relative
