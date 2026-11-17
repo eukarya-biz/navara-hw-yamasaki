@@ -11,7 +11,7 @@ import { CallAudio } from "./audio";
 import { showIntro, showEnding } from "./framing";
 import { TrailRecorder, showTrail, type TrailHandles } from "./trail";
 import { metresPerDegree } from "./geo";
-import { applyPose } from "./camera";
+import { applyPose, easeInOutCubic } from "./camera";
 import { Ground } from "./ground";
 import { Opening } from "./opening";
 import type { SceneDescriptions } from "./descriptions";
@@ -606,10 +606,7 @@ async function main(): Promise<void> {
       // The rise happens over the first part of the shot; the turn continues
       // throughout, so the reveal keeps developing after the climb settles.
       const riseT = Math.min(1, t / cine.riseFrac);
-      const rise =
-        riseT < 0.5
-          ? 4 * riseT * riseT * riseT
-          : 1 - Math.pow(-2 * riseT + 2, 3) / 2;
+      const rise = easeInOutCubic(riseT);
       // Ease the turn at both ends so it does not start or stop abruptly.
       const turn = 0.5 - Math.cos(Math.PI * t) / 2;
 
