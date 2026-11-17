@@ -4,6 +4,7 @@ import type { AmbientLightDesc } from "@navaramap/three-default-descs";
 import { PersonViewPlugin, TileJsonPlugin } from "@navaramap/three-plugins";
 import { Pane } from "tweakpane";
 import { WalkGrid, WalkerConstraint } from "./walkgrid";
+import { Minimap } from "./minimap";
 import { spawnInstancedCrowd, type InstancedCrowdHandles } from "./crowd-instanced";
 import { GOAL, GOAL_APPROACH, GoalController } from "./goal";
 import { CallAudio } from "./audio";
@@ -142,11 +143,13 @@ async function main(): Promise<void> {
   // screenshotted, and a debug readout across it is noise. (The HUD also freezes
   // during the shot, because the frame loop hands over to the cinematic before
   // reaching the HUD update -- so leaving it up would show stale numbers.)
-  for (const node of [hud, help]) {
+  // The minimap joins this list once the walk grid has loaded.
+  const overlays: HTMLElement[] = [hud, help];
+  for (const node of overlays) {
     node.style.transition = "opacity .8s ease";
   }
   const setOverlaysVisible = (visible: boolean): void => {
-    for (const node of [hud, help]) {
+    for (const node of overlays) {
       node.style.opacity = visible ? "1" : "0";
     }
   };
@@ -221,6 +224,11 @@ async function main(): Promise<void> {
     maxAlt: 10000,
   });
   view.addPlugin(personView);
+
+  const minimap = new Minimap(grid, "data/ubld_floorplan.json");
+  view.addPlugin(minimap);
+  document.body.appendChild(minimap.element);
+  overlays.push(minimap.element);
 
   await view.init();
 
@@ -793,11 +801,26 @@ async function main(): Promise<void> {
   });
 
   const fGoal = pane.addFolder({ title: "ゴール(親)", expanded: false });
-  const goalParams = { hint: false };
+  const goalParams = { hint: false, minimap: true, minimapParent: true };
+  const parentOnMap = (on: boolean): void => {
+    minimap.setParent(on ? { lat: GOAL.lat, lng: GOAL.lng } : null);
+  };
+  minimap.setVisible(goalParams.minimap);
+  parentOnMap(goalParams.minimapParent);
   fGoal
     .addBinding(goalParams, "hint", { label: "方向ヒントを出す" })
     .on("change", (ev) => {
       hintArrow.style.display = ev.value ? "block" : "none";
+    });
+  fGoal
+    .addBinding(goalParams, "minimap", { label: "ミニマップ" })
+    .on("change", (ev) => {
+      minimap.setVisible(ev.value);
+    });
+  fGoal
+    .addBinding(goalParams, "minimapParent", { label: "地図に親を出す" })
+    .on("change", (ev) => {
+      parentOnMap(ev.value);
     });
   fGoal.addButton({ title: "親のそばへ移動(演出の確認)" }).on("click", () => {
     // GOAL_APPROACH is a measured cell on the parent's own floor -- see the
