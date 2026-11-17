@@ -147,6 +147,11 @@ view.attribution?.add([
 
 `defaultAttribution: false` でオプトアウトできる。Worker内では `undefined` になるので `?.` が必要。
 
+## navaramap 0.3.1 への更新(2026-11-16)
+
+4 パッケージを 0.2.1 → **0.3.1**(exact)。このシーンではコードの変更は不要で、型チェック・`npm test`・
+`npm ci` からのビルド・ヘッドレスでの描画確認がそのまま通った。
+
 ## navaramap 0.2.1 への更新(2026-10-15)
 
 `@navaramap/three` / `three-default-plugin` / `three-plugins` を 0.0.2 → **0.2.1**
