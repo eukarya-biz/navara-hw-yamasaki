@@ -20,14 +20,20 @@
 // shot wants it.
 
 import ThreeView, { Color, JAPAN_GSI_ELEVATION_DECODER, type Layer } from "@navaramap/three";
-import type { TileJsonPlugin } from "@navaramap/three-plugins";
 
 /** GSI elevation tiles (PNG, 10 m mesh, z1-14, orthometric). */
 const DEM_URL = "https://cyberjapandata.gsi.go.jp/xyz/dem_png/{z}/{x}/{y}.png";
 /** GSI seamless aerial photos (z2-18). */
 const PHOTO_URL = "https://cyberjapandata.gsi.go.jp/xyz/seamlessphoto/{z}/{x}/{y}.jpg";
-/** Sentinel-2 cloudless 2016, from Re:Earth Papers: the globe seen from orbit. */
-const WORLD_IMAGERY_TILEJSON = "https://papers.reearth.land/s2cloudless_2016/tilejson.json";
+/**
+ * Sentinel-2 cloudless 2016 (EOX, CC BY 4.0): the globe seen from orbit.
+ * Taken from the Re:Earth Papers TileJSON
+ * (https://papers.reearth.land/s2cloudless_2016/tilejson.json) and written in
+ * directly: fetching the TileJSON first held the opening on a blank white
+ * globe for ~2 s. Update by hand if that TileJSON's `tiles` ever changes.
+ */
+const WORLD_IMAGERY_URL =
+  "https://tiles.maps.eox.at/wmts/1.0.0/s2cloudless_3857/default/GoogleMapsCompatible/{z}/{y}/{x}.jpg";
 /** Below this height the coarse world imagery is dropped so the GSI detail shows. */
 const WORLD_IMAGERY_HANDOFF_M = 300_000;
 /** PLATEAU Shinjuku Ward buildings, LOD2, FY2025 (official distribution). */
@@ -44,8 +50,6 @@ const GROUND_FADE_M = 2;
  * underground camera "26 m above the ground" and show the city over it.
  */
 export const SHINJUKU_SURFACE_M = 38;
-/** The world imagery is optional; past this wait the opening runs on GSI alone. */
-const WORLD_IMAGERY_TIMEOUT_MS = 5000;
 
 const GSI_CREDIT = {
   attribution: "国土地理院 (地理院タイル)",
@@ -63,7 +67,7 @@ export class Ground {
   constructor(private readonly view: ThreeView) {}
 
   /** Add the layers. Call once after `view.init()`. Starts disabled. */
-  async init(tilejson: TileJsonPlugin): Promise<void> {
+  init(): void {
     const { view } = this;
     // Rasters before the terrain: a raster layer added after the terrain layer
     // is not draped on it (navara 0.2.1 and 0.3.1, checked headless) -- the globe stays
@@ -73,26 +77,12 @@ export class Ground {
       source: view.addSource({ type: "raster-tile", url: PHOTO_URL, maxZoom: 18 }),
       raster: { color: new Color().setHex(0xffffff), opacity: 0, show: false },
     });
-    // Optional: from orbit the GSI world mosaic has a grey gap east of Japan.
-    // Without this source the opening runs on GSI alone.
-    try {
-      // Awaited, because it has to go in before the terrain (above), but
-      // bounded: a TileJSON server that never answers must not hold up the
-      // whole scene.
-      const world = await Promise.race([
-        tilejson.addSource({ type: "raster-tile", url: WORLD_IMAGERY_TILEJSON, maxzoom: 9 }),
-        new Promise<never>((_, reject) =>
-          window.setTimeout(() => reject(new Error(`no answer in ${WORLD_IMAGERY_TIMEOUT_MS} ms`)), WORLD_IMAGERY_TIMEOUT_MS),
-        ),
-      ]);
-      this.worldImagery = view.addLayer({
-        type: "raster",
-        source: world,
-        raster: { color: new Color().setHex(0xffffff), opacity: 1 },
-      });
-    } catch (error) {
-      console.warn("[ground] world imagery unavailable", error);
-    }
+    // From orbit the GSI world mosaic has a grey gap east of Japan.
+    this.worldImagery = view.addLayer({
+      type: "raster",
+      source: view.addSource({ type: "raster-tile", url: WORLD_IMAGERY_URL, maxZoom: 9 }),
+      raster: { color: new Color().setHex(0xffffff), opacity: 1 },
+    });
     view.addLayer({
       type: "terrain",
       source: view.addSource({
@@ -127,7 +117,8 @@ export class Ground {
     this.enabled = on;
     if (on) this.view.attribution?.add([GSI_CREDIT]);
     else this.view.attribution?.remove([GSI_CREDIT]);
-    this.update();
+    // Applied by update() on the next preRender, not here: right after
+    // view.init() the camera has no position to read yet.
   }
 
   private update = (): void => {

@@ -1,7 +1,7 @@
 import ThreeView, { Color } from "@navaramap/three";
 import { DefaultPlugin } from "@navaramap/three-default-plugin";
 import type { AmbientLightDesc } from "@navaramap/three-default-descs";
-import { PersonViewPlugin, TileJsonPlugin } from "@navaramap/three-plugins";
+import { PersonViewPlugin } from "@navaramap/three-plugins";
 import { Pane } from "tweakpane";
 import { WalkGrid, WalkerConstraint } from "./walkgrid";
 import { Minimap } from "./minimap";
@@ -189,8 +189,6 @@ async function main(): Promise<void> {
 
   const defaults = new DefaultPlugin();
   view.addPlugin(defaults);
-  const tilejson = new TileJsonPlugin();
-  view.addPlugin(tilejson);
 
   // Only when a `?tileset=` override was actually given -- floor-following and
   // the walk grid are specific to the Shinjuku underground's own geometry.
@@ -260,7 +258,7 @@ async function main(): Promise<void> {
   // height datum. It shows itself by camera height, so leaving it on costs
   // nothing underground and free flight comes out into the streets.
   const ground = new Ground(view);
-  await ground.init(tilejson);
+  ground.init();
   ground.setEnabled(true);
 
   // A globe-scale renderer's default near plane can be metres deep, which
