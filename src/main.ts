@@ -1,7 +1,7 @@
 import ThreeView, { Color } from "@navaramap/three";
 import { DefaultPlugin } from "@navaramap/three-default-plugin";
 import type { AmbientLightDesc } from "@navaramap/three-default-descs";
-import { PersonViewPlugin } from "@navaramap/three-plugins";
+import { PersonViewPlugin, TileJsonPlugin } from "@navaramap/three-plugins";
 import { Pane } from "tweakpane";
 import { WalkGrid, WalkerConstraint } from "./walkgrid";
 import { spawnInstancedCrowd, type InstancedCrowdHandles } from "./crowd-instanced";
@@ -10,6 +10,9 @@ import { CallAudio } from "./audio";
 import { showIntro, showEnding } from "./framing";
 import { TrailRecorder, showTrail, type TrailHandles } from "./trail";
 import { metresPerDegree } from "./geo";
+import { applyPose } from "./camera";
+import { Ground } from "./ground";
+import { Opening } from "./opening";
 import type { SceneDescriptions } from "./descriptions";
 
 // ---------------------------------------------------------------------------
@@ -50,6 +53,8 @@ const LEVELS: { label: string; lat: number; lng: number; alt: number }[] = [
 
 const DEFAULT_UNDERGROUND_TILESET = "data/shinjuku_ubld_3dtiles/tileset.json";
 const tilesetOverride = new URLSearchParams(location.search).get("tileset");
+/** `?opening=0` starts straight at the intro card (development, headless checks). */
+const playOpening = new URLSearchParams(location.search).get("opening") !== "0";
 
 // THE FIX: a root-relative path like "/data/foo/tileset.json" is fetched fine
 // by the browser, but the engine's own internal URL joining (used to resolve
@@ -181,6 +186,8 @@ async function main(): Promise<void> {
 
   const defaults = new DefaultPlugin();
   view.addPlugin(defaults);
+  const tilejson = new TileJsonPlugin();
+  view.addPlugin(tilejson);
 
   // Only when a `?tileset=` override was actually given -- floor-following and
   // the walk grid are specific to the Shinjuku underground's own geometry.
@@ -203,16 +210,34 @@ async function main(): Promise<void> {
     moveSpeed: 1.9,
     rotationSpeed: 1.6,
     // Default altSpeed is 30 m/s. A corridor is ~2.6 m tall, so one tap of the
-    // descend key used to punch straight through the floor and keep going to
-    // minAlt. Floor-following owns altitude now, but keep this slow in case
-    // free-fly is switched on.
+    // descend key used to punch straight through the floor. Floor-following
+    // owns altitude now, but keep this slow in case free-fly is switched on.
     altSpeed: testingOtherTileset ? 40 : 1.5,
-    minAlt: testingOtherTileset ? -200 : range.min - 2,
-    maxAlt: testingOtherTileset ? 4000 : range.max + 4,
+    // No real altitude limits. The plugin clamps altitude to [minAlt, maxAlt]
+    // every frame, and a clamp near the floors fought the floor-following
+    // (it teleports to the floor, the clamp pulls back) and kept free flight
+    // from rising out through the ground to the city above.
+    minAlt: -1000,
+    maxAlt: 10000,
   });
   view.addPlugin(personView);
 
   await view.init();
+
+  // The opening owns the camera from the first frame: start in orbit rather
+  // than wherever the view defaults to, so nothing loads at the wrong place.
+  const opening = playOpening
+    ? new Opening(view, {
+        lat: START.lat,
+        lng: START.lng,
+        eyeHeight: START.alt + CHILD_EYE_HEIGHT,
+        heading: START.heading,
+      })
+    : null;
+  // Until it has landed, nothing else may move the camera -- PersonView's
+  // teleport() and setHeading() take it even before start().
+  let openingActive = opening !== null;
+  if (opening) applyPose(view, opening.globePose);
 
   defaults.addDefaultPhotorealScene();
 
@@ -222,6 +247,13 @@ async function main(): Promise<void> {
   view.globe.hideUnderground = true;
 
   view.atmosphere.date = SCENE_DATE;
+
+  // The city above (terrain, photos, buildings), in the underground's own
+  // height datum. It shows itself by camera height, so leaving it on costs
+  // nothing underground and free flight comes out into the streets.
+  const ground = new Ground(view);
+  await ground.init(tilejson);
+  ground.setEnabled(true);
 
   // A globe-scale renderer's default near plane can be metres deep, which
   // clips everything when the eye is 1.0 m off the floor of a 3 m corridor.
@@ -352,14 +384,10 @@ async function main(): Promise<void> {
   let trailHandles: TrailHandles | null = null;
 
   // --- ending cinematic ----------------------------------------------------
-  // Rising the camera cannot be done with teleport(): PersonViewPlugin's tick
-  // clamps altitude to [minAlt, maxAlt] on *every* frame, input or not
-  //   x = Math.max(minAlt, Math.min(maxAlt, currentHeight + input))
-  // so a teleport above maxAlt is pulled back the very next frame. The camera
-  // height, though, is `clampedAlt + fpvHeightOffset`, and setFpvHeightOffset()
-  // is unclamped -- so the rise is done by growing the offset instead. The
-  // player's logical position stays on the floor, which also keeps the shot
-  // anchored over where they were standing.
+  // The rise is done by growing the camera's height offset above the player
+  // (setFpvHeightOffset), not by teleporting the player up: the player's
+  // logical position stays on the floor, which keeps the shot anchored over
+  // where they were standing and leaves floor-following nothing to correct.
   // Tunable from the debug panel: this is a shot, and shots get adjusted by
   // looking at them.
   const cine = {
@@ -458,8 +486,8 @@ async function main(): Promise<void> {
     constraint.enabled = false;
     bob.enabled = false;
     setOverlaysVisible(false);
-    view.globe.transparent = true;
-    view.globe.opacity = 0;
+    // The aerial view shows the underground on its own.
+    ground.setEnabled(false);
 
     // Freeze the route and draw it, with a beam at each end. Hidden until now:
     // a 130 m column of light over the goal would look absurd from inside a 3 m
@@ -499,6 +527,7 @@ async function main(): Promise<void> {
   /** Downward FPV pitch in degrees. Positive looks down. */
   let pitch = 0;
   container.addEventListener("click", () => {
+    if (openingActive) return;
     if (document.pointerLockElement !== container) container.requestPointerLock();
   });
   document.addEventListener("mousemove", (e) => {
@@ -521,6 +550,10 @@ async function main(): Promise<void> {
   // teleport(), which changes state and would re-enter the listener.
   let corrections = 0;
   const tick = (): void => {
+    if (openingActive) {
+      requestAnimationFrame(tick);
+      return;
+    }
     const s = personView.getState();
     const fix = constraint.correct(s.lat, s.lng, s.alt);
     if (fix) {
@@ -582,8 +615,7 @@ async function main(): Promise<void> {
       const targetR = cinematicDistanceM * Math.cos(pitchTargetRad);
       const radius = targetR * rise;
 
-      // Anchor position: on the orbit circle around the dataset centre. Only
-      // altitude is clamped by the plugin, so moving lat/lng like this is fine.
+      // Anchor position: on the orbit circle around the dataset centre.
       const anchorLat = areaCenter.lat + (radius * Math.cos(theta)) / centreM.lat;
       const anchorLng = areaCenter.lng + (radius * Math.sin(theta)) / centreM.lng;
       // Face the centre: the bearing from a point on the circle back to the
@@ -596,12 +628,9 @@ async function main(): Promise<void> {
         heading: theta * RAD2DEG + 180,
       });
 
-      // Camera height is `clampedAlt + fpvHeightOffset`, and only the offset is
-      // unclamped -- so read back the altitude the plugin settled on and make up
-      // the difference. Self-correcting, rather than assuming maxAlt.
-      const settledAlt = personView.getState().alt;
+      // Camera height is the anchor's altitude plus fpvHeightOffset.
       const wantHeight = walkParams.eye + (targetH - walkParams.eye) * rise;
-      personView.setFpvHeightOffset(Math.max(0.1, wantHeight - settledAlt));
+      personView.setFpvHeightOffset(Math.max(0.1, wantHeight - START.alt));
       personView.setFpvPitch(pitchNow);
 
       if (t >= 1) {
@@ -837,8 +866,7 @@ async function main(): Promise<void> {
     constraint.enabled = true;
     walkParams.follow = true;
     bob.enabled = true;
-    view.globe.opacity = 1;
-    view.globe.transparent = false;
+    ground.setEnabled(sceneParams.ground);
     pitch = 0;
     personView.setFpvPitch(0);
     personView.setFpvHeightOffset(walkParams.eye);
@@ -858,7 +886,7 @@ async function main(): Promise<void> {
   const fScene = pane.addFolder({ title: "見え方", expanded: false });
   const sceneParams = {
     exposure: 1.0,
-    globeUnder: true,
+    ground: true,
     color: 0xa8a29a,
   };
   fScene
@@ -872,9 +900,9 @@ async function main(): Promise<void> {
       view.toneMappingExposure = ev.value;
     });
   fScene
-    .addBinding(sceneParams, "globeUnder", { label: "地表を隠す(地下用)" })
+    .addBinding(sceneParams, "ground", { label: "地上を表示" })
     .on("change", (ev) => {
-      view.globe.hideUnderground = ev.value;
+      ground.setEnabled(ev.value);
     });
   fScene
     .addButton({ title: "上空200mから俯瞰(描画確認)" })
@@ -882,17 +910,14 @@ async function main(): Promise<void> {
       // Isolates "did the tileset load at all" from "is the camera in the
       // wrong place": from up here the underground mass should be visible as
       // a shape on the ground, with the globe hidden.
-      // teleport({ alt: 200 }) does NOT work here: the plugin's tick clamps
-      // altitude to [minAlt, maxAlt] every frame, so it snaps straight back to
-      // maxAlt (~43 m). Camera height is `clampedAlt + fpvHeightOffset` and the
-      // offset is unclamped, so the lift has to go through the offset instead.
+      // Lifted through the camera's height offset, like the closing shot, so
+      // the player's own position stays on the floor.
       constraint.enabled = false;
       walkParams.follow = false;
       bob.enabled = false; // would otherwise overwrite the offset every frame
-      // The globe is an opaque lid between an above-ground camera and the
-      // underground below it.
-      view.globe.transparent = true;
-      view.globe.opacity = 0;
+      // The city above would hide the underground below it.
+      sceneParams.ground = false;
+      ground.setEnabled(false);
       personView.teleport({
         lat: START.lat - 0.003,
         lng: START.lng,
@@ -925,7 +950,17 @@ async function main(): Promise<void> {
     constraint,
     getCrowd: () => crowd,
     getCrowdCount: () => crowd?.sim.people.length ?? 0,
+    ground,
   });
+
+  if (opening) {
+    setOverlaysVisible(false);
+    pane.hidden = true;
+    await opening.run();
+    openingActive = false;
+    pane.hidden = false;
+    setOverlaysVisible(true);
+  }
 
   showIntro({
     onStart: () => {
