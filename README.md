@@ -17,6 +17,8 @@ npm run dev
 
 ターミナルに表示された `http://localhost:5173/` をブラウザで開く。「はじめる」を押すと開始。
 画面をクリックするとマウスで視点が回る(Esc で解除)。W/S で前進・後退、A/D で回転、Shiftで走る。
+起動直後は地球から地下街へ降りるオープニング(約 16 秒)が流れる。右下の「スキップ」か Esc / Space で飛ばせる
+(下の「オープニングと地上」)。
 
 `git` が無い場合は、リポジトリ右上の **Code > Download ZIP** から取得し、
 展開したフォルダで `cd` してから上記の `npm install` 以降を実行すればよい。
@@ -25,7 +27,11 @@ npm run dev
 
 ## このシーンの前提
 
-`PersonViewPlugin` 0.0.2 には**重力もコリジョンも無い**。垂直方向の処理は
+`PersonViewPlugin` には **3D Tiles に対する重力もコリジョンも無い**。0.2.1 には
+`collision` オプション(`"off" | "clamp" | "ground"`)があるが、これは
+`view.sampleTerrainHeight()` で**地形ソース(quantized-mesh / raster-dem)の高さ**を
+引く仕組みで、地形レイヤーを読まないこのシーンでは高さが返らず何も起きない。
+地下街の床は 3D Tiles のジオメトリなので対象外。既定(`collision` off)の垂直方向の処理は
 `alt += dirZ * altSpeed * dt` を `[minAlt, maxAlt]` でクランプするだけで、
 床を検出する処理は存在しない。デフォルトの `altSpeed` は 30 m/s なので、
 高さ約 3 m の通路では下降キーを 0.33 秒押しただけでデータの外に出てしまう。
@@ -35,7 +41,8 @@ npm run dev
 自前で実装**している。実装は `src/walkgrid.ts`。
 
 地表(globe)は地下から見上げると不透明な蓋になるため、`view.globe.hideUnderground`
-を有効にしている。建物・地形・航空写真のレイヤーは一切読み込まない。
+を有効にしている。地上の層(地形・航空写真・建物)は `src/ground.ts` が読み込み、カメラが地表より
+下にある間は透明にしている(下の「オープニングと地上」)。
 
 ## データの実測値
 
@@ -62,9 +69,21 @@ npm test            # 移動ロジックと到達性の検証
 `simtest.mjs` は PersonViewPlugin の移動モデルを再現して床追従を検証する。
 `reachtest.mjs` は開始地点から塗りつぶし探索して、地下街が連結していることを確認する。
 
-**未検証**: 描画そのものは目視確認していない。作成環境でヘッドレスブラウザが
-入手できなかったため、型チェック・ビルド・アセット配信・移動ロジックまでしか
-確認できていない。見た目(明るさ、SSAO の効き、色)は実機での調整が必要。
+**描画の確認**: ローカルの Chrome をヘッドレスで起動し(`puppeteer-core` は
+devDependencies にある)、dev / preview の両方で「はじめる」→ 親のそばへ移動 → 前進で再会 →
+終幕カードまでを自動操作で通し、スクリーンショットで通路・群衆・光の筋・終幕のマーカーの描画を確認した
+(2026-10-15、navaramap 0.2.1)。見た目(明るさ、SSAO の効き、色)の調整は引き続き実機での判断が必要。
+
+## 平面近似の定数(2026-10-19 修正)
+
+群衆・軌跡・親までの距離・音・終幕の軌道は、緯度経度の差に「1° あたりのメートル数」を掛ける平面近似で
+動いている。従来はその定数が `110540` のベタ書きだったが、新宿の緯度での WGS84 の値は
+**110,953 m/°**(navara の `geodeticToVector3` で実測しても同じ)で、0.37 % 短かった。
+実害は、群衆と軌跡の描画位置が論理位置から最大 0.2〜1 m ずれる(ローカル座標の端で)程度だが、
+`src/geo.ts` の `metresPerDegree(lat)` に置き換えて正確にした。
+
+歩行グリッド(`ubld_walkgrid.json`)は生成時の定数を JSON に持ち、書くときも読むときも同じ数で
+変換するので内部では整合している。そのため触っていない(セルは実寸で 2.0075 m)。
 
 ## グリッドの再生成
 
@@ -128,7 +147,90 @@ view.attribution?.add([
 
 `defaultAttribution: false` でオプトアウトできる。Worker内では `undefined` になるので `?.` が必要。
 
-## 公式テンプレートとの構成差(2026-07-30 調査)
+## navaramap 0.3.1 への更新(2026-11-16)
+
+4 パッケージを 0.2.1 → **0.3.1**(exact)。このシーンではコードの変更は不要で、型チェック・`npm test`・
+`npm ci` からのビルド・ヘッドレスでの描画確認がそのまま通った。
+
+## navaramap 0.2.1 への更新(2026-10-15)
+
+`@navaramap/three` / `three-default-plugin` / `three-plugins` を 0.0.2 → **0.2.1**
+(npm の latest)に上げた。`npm install --save-exact` で固定している。
+
+### API の差分(0.0.2 → 0.2.1)のうち、このシーンに影響したもの
+
+| 項目 | 0.0.2 | 0.2.1 | 対応 |
+|---|---|---|---|
+| パッケージ名 | `three_plugins`(アンダースコア) | **`three-plugins`**(ハイフン、0.0.4〜) | import と `optimizeDeps.exclude` を書き換え |
+| heading / pitch の単位 | ラジアン | **度**(0.1.0〜。`setHeading` / `setFpvPitch` / `teleport({heading})` / `getState().heading` / `startHeading` 全て) | マウス感度・終幕の軌道計算・HUD・`bearingFrom()`・音の定位を度に統一 |
+| 3D Tiles の追加 | `addLayer({type:"cesium3dtiles", data:{url}})` | **`addSource({type:"3d-tiles", url})` + `addLayer({type:"3d-tiles", source})`**(0.0.6〜) | `main.ts` を書き換え。`model` の `show/height/color/maxSse` はそのまま |
+| WASM の配置 | `dist/*.wasm` | **`dist/assets/*.wasm`** | `vite.config.ts` の `dist/*.wasm` コピー指定を削除(空振りするとビルドが落ちる) |
+| `geodeticToVector3` の単位 | ラジアン(WASM の `LLE` 型。`as never` で型を消して渡していた) | **度**(0.1.0〜。`LatLngHeight` を受け、three の `Vector3` を返す) | `goal.ts` / `trail.ts` / `crowd-instanced.ts` / `crowd.ts` の `* DEG2RAD` と型キャストを削除。放置すると群衆・親・光の筋・軌跡が約 11,000 km 離れたギニア湾沖に置かれる(実測。HUD の数値は lat/lng 計算なので正常に見える) |
+
+変わらなかったもの: `rotationSpeed` は 0.0.2 から deg/frame。`startLat/startLng/startHeight`、
+`fpvHeightOffset`(クランプされない)、`minAlt/maxAlt` の毎フレームクランプ、
+`view.globe.hideUnderground`、`view.attribution`、`registerMesh` / `addMesh`、
+`MeshDesc` / `InstancedMeshDesc` のジェネリクス、`northUpEastToFixedFrame`。
+カスタム記述子(`crowd-instanced.ts` / `crowd.ts` / `trail.ts` / `goal.ts` の記述子部分)は
+無変更で型が通ったが、**型が通ることと位置が合うことは別**だった。`geodeticToVector3` の
+単位変更は `as never` で型を消していたため検出されず、群衆アンカーの ECEF を実測して初めて発覚した。
+0.2.0 の BREAKING は selective bloom のみで、ここでは使っていない。
+
+### 検証結果(ヘッドレス Chrome、dev / preview 両方)
+
+- 群衆アンカーの ECEF が START の WGS84 計算値と 0.00 m で一致。START で群衆が見え、
+  親のそばで光の筋が床の光だまりごと見え、終幕で開始地点のビームが見える
+- HUD の「群衆 N/500 表示中」はシミュレーション上の距離で数えているので、
+  **描画位置のバグは HUD では検出できない**。メッシュの位置はスクリーンショットで見ること
+- START の床 24.96 m / 天井 28.16 m、目線 1.0 m(更新前と同じ)
+- `setHeading(90)` → `getHeading()` / `getState().heading` とも 90、`setFpvPitch(30)` → 30
+- 「親のそばへ移動」で 38.50 m 層に着地、親まで 6 m。前進で再会 → 終幕カード表示
+- WASM / EXR のロードエラーなし(404 は favicon のみ)
+- `memoryStats().retainedTiles3d` は 0.2.1 では 0 のまま(ジオメトリは `featureCreated` で
+  数えており HUD の「面」は増える)。HUD の「タイル」は目安にしない
+
+### navara-usage スキルに沿った整理(2026-10-19)
+
+バージョン更新・バグ修正とは別のコミットで、`navara-usage` スキルとの照合で出た項目を
+整理した。見た目と挙動は変えていない。
+
+1. **カスタムメッシュは `geodetic` で置く** — `goal.ts` / `trail.ts` / `crowd-instanced.ts` が
+   自前で `geodeticToVector3` + `northUpEastToFixedFrame` から root の位置と姿勢を組んでいたのを
+   やめ、`addMesh({ ..., geodetic: { lat, lng, height, heading } })` に統一。基底クラスが
+   West-Up-North フレームで `matrixWorld` を固定し、子は普通に動かせる。ローカル座標が
+   `(北, 上, 東)` から `(西, 上, 北)` に変わったので、軌跡の `toLocal`、群衆の `refreshLocal`、
+   向きの式(`π/2 - heading` → `-heading`)を合わせた(`matrixtest.mjs` も更新)。
+   親の向きは `geodetic.heading` で「来た方向を向く」ようにし、首振りは子の `rotation.y` で行う。
+2. **型付きの記述子語彙** — `src/descriptions.ts` の `SceneDescriptions`(既定 +
+   `goalParent` / `goalBeacon` / `trail` / `trailMarker` / `crowdPart`)で `ThreeView` を生成し、
+   `as unknown as AddArg` のキャストを全て削除。`registerMesh` は引き続き必要(実行時の結び付け)。
+3. **`addLight<AmbientLightDesc>`** — `@navaramap/three-default-descs` を直接依存に追加
+   (0.2.1、exact)。構造型 `AmbientHandle` へのキャストを削除。
+4. **描画パス** — 軌跡とマーカーは `getPassKey()` で transparent パスへ(加算合成の
+   オーバーレイなので G-buffer に入れない)。親のそばの光は **opaque のまま**:
+   transparent パスは壁と深度比較しないため、試すと 265 m 先から壁越しに光が見えた(実測)。
+5. **群衆の登録キーを 1 つに** — `crowdTorso` 〜 `crowdArmR` の 6 キーを `crowdPart` 1 つにし、
+   部位は config の `{ sim, part }` で渡す。
+6. **`src/crowd.ts` を削除** — 人型ビルダー `buildBlockPerson` だけ `src/block-person.ts` に移し、
+   親モデルと共有。
+7. **イベントとカメラ** — `view.on("layer", ...)` の種別分岐を `undergroundLayer.on("featureCreated", ...)`
+   に、終幕の画角計算は `view.camera.raw.fov` ではなく `view.camera.fov` を読む。
+
+検証(ヘッドレス Chrome、dev): 群衆アンカーと親 root の ECEF が WGS84 計算値と 0.00 m で一致、
+歩行中の群衆 25 体が進行方向を向く(内積 ≥ 0.9999)、START の床 24.96 m、
+「親のそばへ移動」→ 前進で再会 → 終幕カード(19 秒 / 3 m)まで通る。`tsc --noEmit`、`npm test` 9 件 OK。
+
+GOAL の位置(セルの四方 0.16〜0.24 m に壁。glb の三角形から実測)は、光の柱が壁に埋まっては
+いないので現状のままとした(2026-10-19 判断)。
+
+### `vite.config.ts` の `optimizeDeps.exclude` は 0.2.1 でも必要
+
+下の「要検証」の答え。exclude を外して dev を起動すると、0.2.1 でも
+`WebAssembly.instantiate(): expected magic word 00 61 73 6d, found 3c 21 64 6f`
+(SPA フォールバックの `<!do`)で止まる(2026-10-15 実測、vite 5.4.20 + npm)。
+公式テンプレートが設定なしで動くのは pnpm の node_modules 構造の違いで、navara 側の修正ではない。
+
+## 公式テンプレートとの構成差(2026-07-30 調査・0.0.2 当時の記録)
 
 `reearth/navara-template` を実際にクローンして比較した結果:
 
@@ -207,6 +309,9 @@ view.attribution?.add([
 潰れないので、遠くから見えるビーコンとしてはこちらの方が確実。
 
 保険として、デバッグパネルに「方向ヒントを出す」(矢印)トグルを用意した。**既定はOFF**。
+「ミニマップ」と「地図に親を出す」のトグルもある (「ゴール(親)」フォルダ)。こちらは**どちらも既定でON**で、起動時から地図に親の位置が出る。ミニマップはひろしまアーカイブと同じ作り (navara の Plugin、`preRender` でカメラの位置と向きから描く、220 px の枠、台座付きの白い三角) で、下地は地上の地図ではなく **地下街の平面図**。CityGML から `tools/build_floorplan.py` で床の形と壁の足元 (扉は切れ目) を `public/data/ubld_floorplan.json` に焼き、今いる階を明るく、他の階を薄く描く。北が上、プレイヤー中心で約 180 m 四方 (`src/minimap.ts`)。焼き直し: `python3 -I tools/build_floorplan.py <gml>`。
+
+**注意**: 同梱の平面図は、通路の切れ目(閉鎖面)と両側に床がある扉を外して通路をつないだ CityGML から焼いたもの。地下のモデルは元データのままなので、平面図では開いている通路が、モデルでは閉鎖面や扉で塞がっている場所がある。合わせるなら元の CityGML で焼き直す。
 
 ### 再会の演出
 
@@ -384,6 +489,56 @@ STARTからゴールまでの本物の経路(190セル = 約380m、標高24.9〜
 同一点が連続してもNaNにならないか / インデックスが頂点数を超えないか /
 上空から何ピクセルで見えるか。
 
+## オープニングと地上(2026-11-12)
+
+起動すると、地球から新宿へ降り、地表を透かして地下街へ入り、START の子ども目線に着地する
+(`src/opening.ts`)。そのあとに導入カードが出る。スキップは画面右下のボタンか Esc / Space。
+`?opening=0` を付けるとオープニングを飛ばして導入カードから始まる(開発・ヘッドレス検証用)。
+
+カメラの動かし方はひろしまアーカイブの `camera.ts` と同じ(`src/camera.ts`)。
+requestAnimationFrame + `view.setCamera` で動かし、高さは対数で補間する
+(navara の `flyTo` はフレーム駆動で、実時間の長さを保証しないため)。
+PersonView の `teleport()` は `start()` の前でもカメラを掴む(`cameraFollow`)ので、
+オープニングの間は床追従とマウス操作を止めている。
+
+### 地上の層(`src/ground.ts`)
+
+| 層 | 出典 | 高さ |
+|---|---|---|
+| 地形 | 地理院の標高タイル(`dem_png`、`raster-dem` + `JAPAN_GSI_ELEVATION_DECODER`) | 標高そのまま |
+| 写真 | 地理院のシームレス写真。高さ 300 km より上では Sentinel-2 cloudless 2016(Re:Earth Papers の TileJSON)を重ねる | — |
+| 建物 | PLATEAU 新宿区 建物 LOD2 2025年度(公式配信の 3D Tiles、テクスチャ無し版) | 楕円体高なので `model.height = -37` |
+
+**高さは地上側を標高に揃えた。** 地下のタイル・歩行グリッド・平面図・START などの定数は
+すべて標高のまま。navara は高さを楕円体高として読むので、世界全体が真の楕円体より 37 m 低くなるが、
+新宿の中では地上と地下が実寸で合う。Google 3D Tiles などの楕円体高のデータと混ぜるときだけ、
+このずれを考える必要がある。
+
+Sentinel-2 は Re:Earth Papers の TileJSON に書かれたタイルの URL を `src/ground.ts` に直接書いている。
+TileJSON を先に取りに行くと、その約 2 秒のあいだオープニングが真っ白な地球のまま止まっていたため。
+TileJSON の `tiles` が変わったら手で合わせる。
+
+表示はカメラの高さで決まる。地表(`sampleTerrainHeight`。タイルが未読込で取れないときは新宿駅周辺の 38 m)より 2 m 以上上では globe が不透明で街が見え、
+地表の ±2 m で透けて、それより下では地下だけになる。だから Debug「見え方」→「地上を表示」は既定 ON でも、
+地下を歩いている間の見た目は変わらない。「床に沿って歩く」を外して上昇すると、そのまま新宿の街に出る。
+終幕と「上空200mから俯瞰」は地上を OFF にして地下だけを見せ、「止めて地上から戻る」でスイッチの状態に戻す。
+
+**高度の上下限は外した**(`minAlt: -1000`, `maxAlt: 10000`)。PersonViewPlugin は毎フレーム高度を
+`[minAlt, maxAlt]` に押し込むので、床の近くに上限を置くと床追従の補正と押し合い(出口階段の上端など)になり、
+自由移動で地上へ抜けることもできなかった。床に乗せるのは床追従に任せる。
+
+クレジット: 地理院タイルは地上を表示している間だけ属性表示(ⓘ)に足す。終幕カードには
+地理院タイルと Sentinel-2 cloudless(EOX / Re:Earth Papers)を併記している。
+
+確認したこと(ヘッドレス Chrome):
+
+- START 地点の地表は 33.9 m(標高)で、地下の天井 28.2 m の約 6 m 上にある。
+- 建物の足元は地表に接している(浮きも沈みも無い)。上空から見ると、建物と写真の道路・線路が重なる。
+- オープニングは START の目線(26.0 m、方位 0°、水平)に着地し、「はじめる」で PersonView に渡してもカメラは跳ばない。
+
+ハマった点: **写真の層は地形の層より先に足す。** 地形(`raster-dem`)の後に足した写真の層は地形に貼られず、
+globe が無地の白になる(navara 0.2.1、0.3.1 でも同じ順で確認)。
+
 ## 導入と終幕(`src/framing.ts`)
 
 これが無いと、作品は「灰色の通路を歩けるデモ」に見えてしまう。自分が4歳で、
@@ -431,8 +586,9 @@ STARTからゴールまでの本物の経路(190セル = 約380m、標高24.9〜
 x = Math.max(minAlt, Math.min(maxAlt, currentHeight + input))
 ```
 
-`maxAlt` は `range.max + 4` ≈ 43mなので、200mへteleportしても次フレームで43mに戻る。
+当時の `maxAlt` は `range.max + 4` ≈ 43mだったので、200mへteleportしても次フレームで43mに戻った。
 `teleport()` 自体はクランプしないので一瞬だけ上がって落ちる、という分かりにくい挙動になる。
+(オープニングと地上の追加で高度の上下限は外した。演出のカメラは今も下記の方法で上げている。)
 
 **回避策**: カメラ高度は `クランプ後の高度 + fpvHeightOffset` で、
 **`setFpvHeightOffset()` はクランプされない**。なので上昇はオフセットを伸ばして行う。
@@ -486,8 +642,8 @@ x = Math.max(minAlt, Math.min(maxAlt, currentHeight + input))
 
 ## 群衆(インスタンシング版)
 
-実装は `src/crowd-instanced.ts`。旧版(`src/crowd.ts`、1人=6メッシュ)は親モデルの
-人型ビルダーを提供するために残してある。
+実装は `src/crowd-instanced.ts`。旧版(`src/crowd.ts`、1人=6メッシュ)は 2026-10-19 に削除し、
+人型ビルダー `buildBlockPerson` だけ `src/block-person.ts` に移して親モデルと共有している。
 
 ### なぜ書き直したか
 
@@ -526,8 +682,9 @@ transformなのでfloat64)、**各インスタンス行列はアンカーから�
 
 ### フレームの規約
 
-アンカーはNorth-Up-Eastフレームなので、ローカル `(x, y, z)` = `(北 m, 上 m, 東 m)`。
-モデルの正面は`+Z`、左右は`±X`。だから**ローカルX軸まわりの回転が手脚の前後スイング**になる。
+アンカーは `geodetic` で置くので West-Up-North フレーム。ローカル `(x, y, z)` = `(西 m, 上 m, 北 m)`。
+モデルの正面は`+Z`(= 北)で、方位 heading(北から時計回り)は Y 軸まわりの `-heading` 回転。
+左右は`±X`。だから**ローカルX軸まわりの回転が手脚の前後スイング**になる。
 
 `matrixtest.mjs` で検証済み:
 - 方位0/90/180/270°で、モデル正面が実際に北/東/南/西を向く
@@ -580,7 +737,8 @@ NavaraがG-buffer書き込み用にパッチするShaderLibマテリアルの一
 
 ## 群衆(試作・アセット不使用)
 
-外部キャラクターパックを使わず、コードだけで生成した群衆。実装は `src/crowd.ts`。
+外部キャラクターパックを使わず、コードだけで生成した群衆。実装は `src/crowd.ts` だった
+(2026-10-19 に削除。人型ビルダーは `src/block-person.ts` に残っている)。以下は当時の記録。
 
 - 見た目: Three.js の Box ジオメトリだけで組んだ簡易な人型(胴体・頭・腕2・脚2)。
   Kenney/Kay Lousbergパックの代わり。色をキャラごとに変えて「コピペ感」を軽減。
@@ -601,7 +759,7 @@ NavaraがG-buffer書き込み用にパッチするShaderLibマテリアルの一
 1. `geodeticToVector3` への `lat`/`lng` は「ラジアン」という型定義のコメントを
    信じて変換して渡している。もし全員が原点付近など明後日の位置に出るなら、
    度(degree)のまま渡す方に変えてみること(1行の修正で済む)。
-2. 進行方向(heading)からキャラの向きを求める式(`src/crowd.ts` 末尾のコメント参照)。
+2. 進行方向(heading)からキャラの向きを求める式。
    もし脚の振りと進んでいる方向がズレて見えるなら、符号を反転してみること
    — 位置・床追従のロジックとは独立しているので、ここだけ直せばよい。
 
@@ -613,7 +771,8 @@ NavaraがG-buffer書き込み用にパッチするShaderLibマテリアルの一
 そのため今回はコード生成の代替案(上記)に切り替えた。有料版が復活した場合、
 または他のCC0キャラクターパック(Kenney "Mini Characters" など)を使う場合は、
 GLTFへの変換(`assimp` または `FBX2glTF`)と `GLTFModelDesc` への差し替えが必要。
-`src/crowd.ts` の `CrowdPersonMeshDesc` を GLTF版に置き換える形になる想定。
+`src/block-person.ts` の `buildBlockPerson` と `src/crowd-instanced.ts` の部位ジオメトリを
+GLTF 版に置き換える形になる想定。
 
 
 

@@ -157,6 +157,7 @@ export function showEnding(
     <div style="border-top:1px solid rgba(255,255,255,.12);padding-top:16px;
                 font-size:12px;color:#948c82;line-height:1.9;">
       3D City Model (Project PLATEAU) Shinjuku Ward (FY2025) - MLIT<br>
+      地理院タイル (国土地理院) / Sentinel-2 cloudless 2016 by EOX (Re:Earth Papers)<br>
       Rendered with Navara
     </div>
   `,

@@ -1,17 +1,20 @@
 import ThreeView, { Color } from "@navaramap/three";
-import {
-  DefaultPlugin,
-  type DefaultDescriptions,
-} from "@navaramap/three_default_plugin";
-import { PersonViewPlugin } from "@navaramap/three_plugins";
+import { DefaultPlugin } from "@navaramap/three-default-plugin";
+import type { AmbientLightDesc } from "@navaramap/three-default-descs";
+import { PersonViewPlugin } from "@navaramap/three-plugins";
 import { Pane } from "tweakpane";
 import { WalkGrid, WalkerConstraint } from "./walkgrid";
+import { Minimap } from "./minimap";
 import { spawnInstancedCrowd, type InstancedCrowdHandles } from "./crowd-instanced";
 import { GOAL, GOAL_APPROACH, GoalController } from "./goal";
 import { CallAudio } from "./audio";
 import { showIntro, showEnding } from "./framing";
 import { TrailRecorder, showTrail, type TrailHandles } from "./trail";
-import type { MeshHandle } from "@navaramap/three";
+import { metresPerDegree } from "./geo";
+import { applyPose, easeInOutCubic } from "./camera";
+import { Ground } from "./ground";
+import { Opening } from "./opening";
+import type { SceneDescriptions } from "./descriptions";
 
 // ---------------------------------------------------------------------------
 // Facts measured from the tileset, not guessed.
@@ -51,6 +54,8 @@ const LEVELS: { label: string; lat: number; lng: number; alt: number }[] = [
 
 const DEFAULT_UNDERGROUND_TILESET = "data/shinjuku_ubld_3dtiles/tileset.json";
 const tilesetOverride = new URLSearchParams(location.search).get("tileset");
+/** `?opening=0` starts straight at the intro card (development, headless checks). */
+const playOpening = new URLSearchParams(location.search).get("opening") !== "0";
 
 // THE FIX: a root-relative path like "/data/foo/tileset.json" is fetched fine
 // by the browser, but the engine's own internal URL joining (used to resolve
@@ -64,6 +69,11 @@ const UNDERGROUND_TILESET = new URL(
   location.href,
 ).href;
 const WALK_GRID = "data/ubld_walkgrid.json";
+
+// PersonViewPlugin's public heading/pitch API is in degrees (navara >= 0.1.0);
+// the trigonometry for the closing shot still wants radians.
+const DEG2RAD = Math.PI / 180;
+const RAD2DEG = 180 / Math.PI;
 
 /** Child's eye line. This is the whole point of the project. */
 // A 4-year-old. Children get lost most between 2 and 5 -- roughly 80% of cases
@@ -133,11 +143,13 @@ async function main(): Promise<void> {
   // screenshotted, and a debug readout across it is noise. (The HUD also freezes
   // during the shot, because the frame loop hands over to the cinematic before
   // reaching the HUD update -- so leaving it up would show stale numbers.)
-  for (const node of [hud, help]) {
+  // The minimap joins this list once the walk grid has loaded.
+  const overlays: HTMLElement[] = [hud, help];
+  for (const node of overlays) {
     node.style.transition = "opacity .8s ease";
   }
   const setOverlaysVisible = (visible: boolean): void => {
-    for (const node of [hud, help]) {
+    for (const node of overlays) {
       node.style.opacity = visible ? "1" : "0";
     }
   };
@@ -165,7 +177,7 @@ async function main(): Promise<void> {
   }
 
   // --- view ---------------------------------------------------------------
-  const view = new ThreeView<DefaultDescriptions>({
+  const view = new ThreeView<SceneDescriptions>({
     container,
     animation: true,
     picking: false,
@@ -199,16 +211,39 @@ async function main(): Promise<void> {
     moveSpeed: 1.9,
     rotationSpeed: 1.6,
     // Default altSpeed is 30 m/s. A corridor is ~2.6 m tall, so one tap of the
-    // descend key used to punch straight through the floor and keep going to
-    // minAlt. Floor-following owns altitude now, but keep this slow in case
-    // free-fly is switched on.
+    // descend key used to punch straight through the floor. Floor-following
+    // owns altitude now, but keep this slow in case free-fly is switched on.
     altSpeed: testingOtherTileset ? 40 : 1.5,
-    minAlt: testingOtherTileset ? -200 : range.min - 2,
-    maxAlt: testingOtherTileset ? 4000 : range.max + 4,
+    // No real altitude limits. The plugin clamps altitude to [minAlt, maxAlt]
+    // every frame, and a clamp near the floors fought the floor-following
+    // (it teleports to the floor, the clamp pulls back) and kept free flight
+    // from rising out through the ground to the city above.
+    minAlt: -1000,
+    maxAlt: 10000,
   });
   view.addPlugin(personView);
 
+  const minimap = new Minimap(grid, "data/ubld_floorplan.json");
+  view.addPlugin(minimap);
+  document.body.appendChild(minimap.element);
+  overlays.push(minimap.element);
+
   await view.init();
+
+  // The opening owns the camera from the first frame: start in orbit rather
+  // than wherever the view defaults to, so nothing loads at the wrong place.
+  const opening = playOpening
+    ? new Opening(view, {
+        lat: START.lat,
+        lng: START.lng,
+        eyeHeight: START.alt + CHILD_EYE_HEIGHT,
+        heading: START.heading,
+      })
+    : null;
+  // Until it has landed, nothing else may move the camera -- PersonView's
+  // teleport() and setHeading() take it even before start().
+  let openingActive = opening !== null;
+  if (opening) applyPose(view, opening.globePose);
 
   defaults.addDefaultPhotorealScene();
 
@@ -218,6 +253,13 @@ async function main(): Promise<void> {
   view.globe.hideUnderground = true;
 
   view.atmosphere.date = SCENE_DATE;
+
+  // The city above (terrain, photos, buildings), in the underground's own
+  // height datum. It shows itself by camera height, so leaving it on costs
+  // nothing underground and free flight comes out into the streets.
+  const ground = new Ground(view);
+  ground.init();
+  ground.setEnabled(true);
 
   // A globe-scale renderer's default near plane can be metres deep, which
   // clips everything when the eye is 1.0 m off the floor of a 3 m corridor.
@@ -232,30 +274,26 @@ async function main(): Promise<void> {
   const EXPOSURE_BASE = 1.0;
   view.toneMappingExposure = EXPOSURE_BASE;
 
-  // addLight() accepts the ambient shape, but its return type is the base
-  // LightHandle, whose update() only knows about `position`. The concrete
-  // AmbientLightDesc type lives in @navaramap/three_default_descs, which is
-  // only a transitive dependency here -- importing across that boundary would
-  // couple us to a version we do not manage. A structural type for just the
-  // one call we make is enough, and keeps the dependency surface unchanged.
-  type AmbientHandle = {
-    update: (u: { ambient?: { intensity?: number } }) => void;
-  };
-  const ambientLight = view.addLight({
+  // Typed through the descriptor class, so update() knows the ambient shape.
+  const ambientLight = view.addLight<AmbientLightDesc>({
     ambient: { intensity: AMBIENT_BASE },
-  }) as unknown as AmbientHandle;
+  });
 
   // Ambient occlusion is what actually makes an unlit interior readable: it
   // darkens corners and recesses from geometry alone, no light required.
   view.addEffect({ ssao: { intensity: 2.0, radius: 0.05 } });
 
-  const undergroundLayer = view.addLayer({
-    type: "cesium3dtiles",
-    // The converter wrote EPSG:6697, so these heights are orthometric -- the
-    // same datum the walk grid was measured in. No geoid shift here.
+  const undergroundSource = view.addSource({
+    type: "3d-tiles",
     // IMPORTANT: this URL must be fully-qualified (see UNDERGROUND_TILESET
     // above) -- a root-relative path silently loads nothing.
-    data: { url: UNDERGROUND_TILESET },
+    url: UNDERGROUND_TILESET,
+  });
+  // The converter wrote EPSG:6697, so these heights are orthometric -- the
+  // same datum the walk grid was measured in. No geoid shift here.
+  const undergroundLayer = view.addLayer({
+    type: "3d-tiles",
+    source: undergroundSource,
     model: {
       show: true,
       height: 0,
@@ -268,12 +306,12 @@ async function main(): Promise<void> {
   // Feature creation is the earliest sign the tileset parsed and produced
   // geometry, so count it.
   let features = 0;
-  view.on("layer", (kind, layerId, ..._rest) => {
-    if (kind === "featureCreated") {
-      features++;
-      if (features <= 3 || features % 200 === 0) {
-        console.info(`[layer] featureCreated #${features} (${layerId})`);
-      }
+  undergroundLayer.on("featureCreated", () => {
+    features++;
+    if (features <= 3 || features % 200 === 0) {
+      console.info(
+        `[layer] featureCreated #${features} (${undergroundLayer.id})`,
+      );
     }
   });
 
@@ -352,14 +390,10 @@ async function main(): Promise<void> {
   let trailHandles: TrailHandles | null = null;
 
   // --- ending cinematic ----------------------------------------------------
-  // Rising the camera cannot be done with teleport(): PersonViewPlugin's tick
-  // clamps altitude to [minAlt, maxAlt] on *every* frame, input or not
-  //   x = Math.max(minAlt, Math.min(maxAlt, currentHeight + input))
-  // so a teleport above maxAlt is pulled back the very next frame. The camera
-  // height, though, is `clampedAlt + fpvHeightOffset`, and setFpvHeightOffset()
-  // is unclamped -- so the rise is done by growing the offset instead. The
-  // player's logical position stays on the floor, which also keeps the shot
-  // anchored over where they were standing.
+  // The rise is done by growing the camera's height offset above the player
+  // (setFpvHeightOffset), not by teleporting the player up: the player's
+  // logical position stays on the floor, which keeps the shot anchored over
+  // where they were standing and leaves floor-following nothing to correct.
   // Tunable from the debug panel: this is a shot, and shots get adjusted by
   // looking at them.
   const cine = {
@@ -378,6 +412,8 @@ async function main(): Promise<void> {
   // rather than guessed, so the shot frames the whole thing.
   //   南北 474 m / 東西 502 m / 対角 690 m, centre 35.6928566, 139.7008250
   const areaCenter = grid.bounds();
+  /** Degree-to-metre scale at the centre, for the orbit and bearings. */
+  const centreM = metresPerDegree(areaCenter.lat);
 
   /**
    * How far the camera has to be from the centre for the whole dataset to fit,
@@ -387,9 +423,10 @@ async function main(): Promise<void> {
    * frustum also means it still frames correctly in any window shape.
    */
   function framingDistanceM(): number {
-    const cam = view.camera.raw;
-    const vHalf = ((cam.fov ?? 50) / 2) * (Math.PI / 180);
-    const aspect = cam.aspect || 16 / 9;
+    // The wrapper exposes the vertical FOV in degrees; only the aspect has no
+    // getter, and reading it off `raw` is harmless (writing would not be).
+    const vHalf = ((view.camera.fov ?? 50) / 2) * DEG2RAD;
+    const aspect = view.camera.raw.aspect || 16 / 9;
     const hHalf = Math.atan(Math.tan(vHalf) * aspect);
     // Fit the diagonal, because the shot rotates and the extent presented to
     // the camera changes as it goes round.
@@ -406,6 +443,8 @@ async function main(): Promise<void> {
 
   // --- goal: the parent, and the light that leads to them ------------------
   let searchStartedMs = performance.now();
+  /** When the parent was found; the ending card's "探していた時間" ends here. */
+  let reunionMs: number | null = null;
 
   // Insurance, off by default: an arrow pointing at the parent. The design
   // decision was to guide with light, because a permanent arrow dissolves the
@@ -426,6 +465,7 @@ async function main(): Promise<void> {
 
   const goal = new GoalController(view, AMBIENT_BASE, EXPOSURE_BASE, {
     onReunion: () => {
+      reunionMs = performance.now();
       audio.stopCalling();
       audio.playRelief();
       // The shot starts from wherever the player was standing, lifting away
@@ -446,14 +486,14 @@ async function main(): Promise<void> {
     cinematicDistanceM = framingDistanceM();
     const st = personView.getState();
     cinematicHeadingStart = Math.atan2(
-      (st.lng - areaCenter.lng) * areaCenter.mPerDegLng,
-      (st.lat - areaCenter.lat) * 110540,
+      (st.lng - areaCenter.lng) * centreM.lng,
+      (st.lat - areaCenter.lat) * centreM.lat,
     );
     constraint.enabled = false;
     bob.enabled = false;
     setOverlaysVisible(false);
-    view.globe.transparent = true;
-    view.globe.opacity = 0;
+    // The aerial view shows the underground on its own.
+    ground.setEnabled(false);
 
     // Freeze the route and draw it, with a beam at each end. Hidden until now:
     // a 130 m column of light over the goal would look absurd from inside a 3 m
@@ -486,19 +526,28 @@ async function main(): Promise<void> {
 
   // --- mouse look ---------------------------------------------------------
   // PersonViewPlugin has no mouse look, but setHeading/setFpvPitch are public,
-  // so pointer lock can drive them directly.
-  const MAX_PITCH = (85 * Math.PI) / 180;
+  // so pointer lock can drive them directly. Both take degrees; the sensitivity
+  // is the previous 0.0022 rad/px expressed in degrees, so the feel is unchanged.
+  const LOOK_DEG_PER_PX = 0.0022 * RAD2DEG;
+  const MAX_PITCH_DEG = 85;
+  /** Downward FPV pitch in degrees. Positive looks down. */
   let pitch = 0;
   container.addEventListener("click", () => {
+    if (openingActive) return;
     if (document.pointerLockElement !== container) container.requestPointerLock();
   });
   document.addEventListener("mousemove", (e) => {
     if (document.pointerLockElement !== container) return;
-    personView.setHeading(personView.getHeading() + e.movementX * 0.0022);
+    personView.setHeading(
+      personView.getHeading() + e.movementX * LOOK_DEG_PER_PX,
+    );
     // Positive fpvPitch tilts the view down, so invert movementY.
     // The cinematic owns the pitch while it runs.
     if (cinematicStartMs !== null && !cinematicDone) return;
-    pitch = Math.max(-MAX_PITCH, Math.min(MAX_PITCH, pitch + e.movementY * 0.0022));
+    pitch = Math.max(
+      -MAX_PITCH_DEG,
+      Math.min(MAX_PITCH_DEG, pitch + e.movementY * LOOK_DEG_PER_PX),
+    );
     personView.setFpvPitch(pitch);
   });
 
@@ -507,6 +556,10 @@ async function main(): Promise<void> {
   // teleport(), which changes state and would re-enter the listener.
   let corrections = 0;
   const tick = (): void => {
+    if (openingActive) {
+      requestAnimationFrame(tick);
+      return;
+    }
     const s = personView.getState();
     const fix = constraint.correct(s.lat, s.lng, s.alt);
     if (fix) {
@@ -521,16 +574,20 @@ async function main(): Promise<void> {
 
     const nowMs = performance.now();
 
+    // The closing shot moves the player along an orbit a few centimetres a
+    // frame; that is not walking, so neither the distance nor the bob count it.
+    const inCinematic = cinematicStartMs !== null && !cinematicDone;
+
     // How far the player moved since the last frame -- drives both the walked
     // distance shown at the end and whether the head bobs.
     let movedM = 0;
     if (lastPos) {
-      const dN = (s.lat - lastPos.lat) * 110540;
-      const dE =
-        (s.lng - lastPos.lng) * 110540 * Math.cos(s.lat * (Math.PI / 180));
+      const m = metresPerDegree(s.lat);
+      const dN = (s.lat - lastPos.lat) * m.lat;
+      const dE = (s.lng - lastPos.lng) * m.lng;
       movedM = Math.hypot(dN, dE);
       // Ignore teleports (debug buttons, level jumps) so the total stays honest.
-      if (movedM < 2) distanceWalkedM += movedM;
+      if (movedM < 2 && !inCinematic) distanceWalkedM += movedM;
       lastPos.lat = s.lat;
       lastPos.lng = s.lng;
     } else {
@@ -547,54 +604,46 @@ async function main(): Promise<void> {
       // The rise happens over the first part of the shot; the turn continues
       // throughout, so the reveal keeps developing after the climb settles.
       const riseT = Math.min(1, t / cine.riseFrac);
-      const rise =
-        riseT < 0.5
-          ? 4 * riseT * riseT * riseT
-          : 1 - Math.pow(-2 * riseT + 2, 3) / 2;
+      const rise = easeInOutCubic(riseT);
       // Ease the turn at both ends so it does not start or stop abruptly.
       const turn = 0.5 - Math.cos(Math.PI * t) / 2;
 
-      const pitchTarget = (cine.pitchDeg * Math.PI) / 180;
-      const pitchNow = pitch + (pitchTarget - pitch) * rise;
-      const theta =
-        cinematicHeadingStart + ((cine.orbitDeg * Math.PI) / 180) * turn;
+      const pitchTargetRad = cine.pitchDeg * DEG2RAD;
+      const pitchNow = pitch + (cine.pitchDeg - pitch) * rise;
+      const theta = cinematicHeadingStart + cine.orbitDeg * DEG2RAD * turn;
 
       // Decompose the framing distance into height and ground radius at the
       // look-down angle, so the camera ends up on a cone around the centre.
-      const targetH = cinematicDistanceM * Math.sin(pitchTarget);
-      const targetR = cinematicDistanceM * Math.cos(pitchTarget);
+      const targetH = cinematicDistanceM * Math.sin(pitchTargetRad);
+      const targetR = cinematicDistanceM * Math.cos(pitchTargetRad);
       const radius = targetR * rise;
 
-      // Anchor position: on the orbit circle around the dataset centre. Only
-      // altitude is clamped by the plugin, so moving lat/lng like this is fine.
-      const anchorLat = areaCenter.lat + (radius * Math.cos(theta)) / 110540;
-      const anchorLng =
-        areaCenter.lng + (radius * Math.sin(theta)) / areaCenter.mPerDegLng;
+      // Anchor position: on the orbit circle around the dataset centre.
+      const anchorLat = areaCenter.lat + (radius * Math.cos(theta)) / centreM.lat;
+      const anchorLng = areaCenter.lng + (radius * Math.sin(theta)) / centreM.lng;
       // Face the centre: the bearing from a point on the circle back to the
-      // middle is its own angle plus half a turn.
+      // middle is its own angle plus half a turn. theta is radians for the
+      // trigonometry above; the plugin takes degrees.
       personView.teleport({
         lat: anchorLat,
         lng: anchorLng,
         alt: START.alt,
-        heading: theta + Math.PI,
+        heading: theta * RAD2DEG + 180,
       });
 
-      // Camera height is `clampedAlt + fpvHeightOffset`, and only the offset is
-      // unclamped -- so read back the altitude the plugin settled on and make up
-      // the difference. Self-correcting, rather than assuming maxAlt.
-      const settledAlt = personView.getState().alt;
+      // Camera height is the anchor's altitude plus fpvHeightOffset.
       const wantHeight = walkParams.eye + (targetH - walkParams.eye) * rise;
-      personView.setFpvHeightOffset(Math.max(0.1, wantHeight - settledAlt));
+      personView.setFpvHeightOffset(Math.max(0.1, wantHeight - START.alt));
       personView.setFpvPitch(pitchNow);
 
       if (t >= 1) {
         cinematicDone = true;
         // Hand the pitch back where the cinematic left it, so the first mouse
         // movement afterwards does not snap the view back to horizontal.
-        pitch = (cine.pitchDeg * Math.PI) / 180;
+        pitch = cine.pitchDeg;
         showEnding(
           {
-            elapsedSec: (performance.now() - searchStartedMs) / 1000,
+            elapsedSec: ((reunionMs ?? performance.now()) - searchStartedMs) / 1000,
             distanceM: distanceWalkedM,
             walkableAreaM2: grid.cellCount * 4, // 2 m grid
             longestPathM: LONGEST_PATH_M,
@@ -637,7 +686,7 @@ async function main(): Promise<void> {
     goal.update(s.lat, s.lng, nowMs);
     if (hintArrow.style.display !== "none") {
       const rel = goal.bearingFrom(s.lat, s.lng) - s.heading;
-      hintArrow.style.transform = `rotate(${(rel * 180) / Math.PI}deg)`;
+      hintArrow.style.transform = `rotate(${rel}deg)`;
     }
     audio.setListener(s.lat, s.lng, s.heading);
     audio.update(nowMs);
@@ -649,14 +698,12 @@ async function main(): Promise<void> {
     }
 
     const surf = constraint.lastSurface;
-    const mem = view.memoryStats();
-    const tiles = mem?.retainedTiles3d ?? -1;
     hud.textContent =
       `lat  ${s.lat.toFixed(6)}\n` +
       `lng  ${s.lng.toFixed(6)}\n` +
       `alt  ${s.alt.toFixed(2)} m (標高)\n` +
       `視線 ${(s.alt + personView.getFpvHeightOffset()).toFixed(2)} m\n` +
-      `向き ${(((((s.heading * 180) / Math.PI) % 360) + 360) % 360).toFixed(0)}°\n` +
+      `向き ${(((s.heading % 360) + 360) % 360).toFixed(0)}°\n` +
       `状態 ${
         {
           floor: "床の上",
@@ -668,8 +715,7 @@ async function main(): Promise<void> {
       (surf
         ? `床   ${surf.floor.toFixed(2)} m / 天井 ${surf.ceiling.toFixed(2)} m\n`
         : "床   なし\n") +
-      `タイル ${tiles === -1 ? "?" : tiles} / 面 ${features}` +
-      `${tiles === 0 && features === 0 ? "  ← 読込0件" : ""}\n` +
+      `面 ${features}${features === 0 ? "  ← 読込0件" : ""}\n` +
       `補正 ${corrections}\n` +
       `群衆 ${crowd?.sim.visibleCount() ?? 0}/${crowdParams.count} 表示中\n` +
       `親まで ${goal.distanceM.toFixed(0)} m` +
@@ -731,9 +777,7 @@ async function main(): Promise<void> {
   }
 
   const fCrowd = pane.addFolder({ title: "群衆(試作)", expanded: false });
-  fCrowd
-    .addBinding(crowdParams, "count", { label: "人数", min: 0, max: 1500, step: 50 })
-    .on("change", () => {});
+  fCrowd.addBinding(crowdParams, "count", { label: "人数", min: 0, max: 1500, step: 50 });
   fCrowd.addButton({ title: "配置し直す" }).on("click", () => respawnCrowd());
 
   const fFeel = pane.addFolder({ title: "歩きの感触", expanded: false });
@@ -752,11 +796,26 @@ async function main(): Promise<void> {
   });
 
   const fGoal = pane.addFolder({ title: "ゴール(親)", expanded: false });
-  const goalParams = { hint: false };
+  const goalParams = { hint: false, minimap: true, minimapParent: true };
+  const parentOnMap = (on: boolean): void => {
+    minimap.setParent(on ? { lat: GOAL.lat, lng: GOAL.lng } : null);
+  };
+  minimap.setVisible(goalParams.minimap);
+  parentOnMap(goalParams.minimapParent);
   fGoal
     .addBinding(goalParams, "hint", { label: "方向ヒントを出す" })
     .on("change", (ev) => {
       hintArrow.style.display = ev.value ? "block" : "none";
+    });
+  fGoal
+    .addBinding(goalParams, "minimap", { label: "ミニマップ" })
+    .on("change", (ev) => {
+      minimap.setVisible(ev.value);
+    });
+  fGoal
+    .addBinding(goalParams, "minimapParent", { label: "地図に親を出す" })
+    .on("change", (ev) => {
+      parentOnMap(ev.value);
     });
   fGoal.addButton({ title: "親のそばへ移動(演出の確認)" }).on("click", () => {
     // GOAL_APPROACH is a measured cell on the parent's own floor -- see the
@@ -825,8 +884,7 @@ async function main(): Promise<void> {
     constraint.enabled = true;
     walkParams.follow = true;
     bob.enabled = true;
-    view.globe.opacity = 1;
-    view.globe.transparent = false;
+    ground.setEnabled(sceneParams.ground);
     pitch = 0;
     personView.setFpvPitch(0);
     personView.setFpvHeightOffset(walkParams.eye);
@@ -839,13 +897,14 @@ async function main(): Promise<void> {
     goal.reset();
     audio.startCalling();
     searchStartedMs = performance.now();
+    reunionMs = null;
     distanceWalkedM = 0;
   });
 
   const fScene = pane.addFolder({ title: "見え方", expanded: false });
   const sceneParams = {
     exposure: 1.0,
-    globeUnder: true,
+    ground: true,
     color: 0xa8a29a,
   };
   fScene
@@ -859,9 +918,9 @@ async function main(): Promise<void> {
       view.toneMappingExposure = ev.value;
     });
   fScene
-    .addBinding(sceneParams, "globeUnder", { label: "地表を隠す(地下用)" })
+    .addBinding(sceneParams, "ground", { label: "地上を表示" })
     .on("change", (ev) => {
-      view.globe.hideUnderground = ev.value;
+      ground.setEnabled(ev.value);
     });
   fScene
     .addButton({ title: "上空200mから俯瞰(描画確認)" })
@@ -869,17 +928,14 @@ async function main(): Promise<void> {
       // Isolates "did the tileset load at all" from "is the camera in the
       // wrong place": from up here the underground mass should be visible as
       // a shape on the ground, with the globe hidden.
-      // teleport({ alt: 200 }) does NOT work here: the plugin's tick clamps
-      // altitude to [minAlt, maxAlt] every frame, so it snaps straight back to
-      // maxAlt (~43 m). Camera height is `clampedAlt + fpvHeightOffset` and the
-      // offset is unclamped, so the lift has to go through the offset instead.
+      // Lifted through the camera's height offset, like the closing shot, so
+      // the player's own position stays on the floor.
       constraint.enabled = false;
       walkParams.follow = false;
       bob.enabled = false; // would otherwise overwrite the offset every frame
-      // The globe is an opaque lid between an above-ground camera and the
-      // underground below it.
-      view.globe.transparent = true;
-      view.globe.opacity = 0;
+      // The city above would hide the underground below it.
+      sceneParams.ground = false;
+      ground.setEnabled(false);
       personView.teleport({
         lat: START.lat - 0.003,
         lng: START.lng,
@@ -887,7 +943,7 @@ async function main(): Promise<void> {
         heading: 0,
       });
       personView.setFpvHeightOffset(200);
-      pitch = (55 * Math.PI) / 180; // positive pitch looks down
+      pitch = 55; // degrees; positive pitch looks down
       personView.setFpvPitch(pitch);
       pane.refresh();
     });
@@ -912,7 +968,17 @@ async function main(): Promise<void> {
     constraint,
     getCrowd: () => crowd,
     getCrowdCount: () => crowd?.sim.people.length ?? 0,
+    ground,
   });
+
+  if (opening) {
+    setOverlaysVisible(false);
+    pane.hidden = true;
+    await opening.run();
+    openingActive = false;
+    pane.hidden = false;
+    setOverlaysVisible(true);
+  }
 
   showIntro({
     onStart: () => {

@@ -11,9 +11,10 @@
     "test": "node simtest.mjs && node reachtest.mjs && node goaltest.mjs && node matrixtest.mjs && node feeltest.mjs && node trailtest.mjs && node audiotest.mjs"
   },
   "dependencies": {
-    "@navaramap/three": "0.0.2",
-    "@navaramap/three_default_plugin": "0.0.2",
-    "@navaramap/three_plugins": "0.0.2",
+    "@navaramap/three": "0.3.1",
+    "@navaramap/three-default-descs": "0.3.1",
+    "@navaramap/three-default-plugin": "0.3.1",
+    "@navaramap/three-plugins": "0.3.1",
     "postprocessing": "6.39.4",
     "three": "0.183.2",
     "tweakpane": "4.0.5"

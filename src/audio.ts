@@ -20,6 +20,8 @@
 // has to be called from a real click -- main.ts does that from the same click
 // that grabs pointer lock.
 
+import { metresPerDegree } from "./geo";
+
 // Relative, not root-absolute: on GitHub Pages the app is served from a
 // repository subpath, and "/audio/..." would resolve to the domain root.
 const CALL_FILES = ["audio/call1.mp3", "audio/call2.mp3", "audio/call3.mp3"];
@@ -394,8 +396,9 @@ export class CallAudio {
     if (this.nextBabbleMs < nowMs) this.nextBabbleMs = nowMs;
   }
 
-  setListener(lat: number, lng: number, heading: number): void {
-    this.listener = { lat, lng, heading };
+  /** Heading in degrees (0 = north, clockwise), as PersonViewPlugin reports it. */
+  setListener(lat: number, lng: number, headingDeg: number): void {
+    this.listener = { lat, lng, heading: headingDeg * (Math.PI / 180) };
   }
 
   setSource(lat: number, lng: number): void {
@@ -419,11 +422,9 @@ export class CallAudio {
     }
     if (nowMs - this.lastCallMs < CALL_INTERVAL_MS) return;
 
-    const dLat = (this.source.lat - this.listener.lat) * 110540;
-    const dLng =
-      (this.source.lng - this.listener.lng) *
-      110540 *
-      Math.cos(this.listener.lat * (Math.PI / 180));
+    const m = metresPerDegree(this.listener.lat);
+    const dLat = (this.source.lat - this.listener.lat) * m.lat;
+    const dLng = (this.source.lng - this.listener.lng) * m.lng;
     const distance = Math.hypot(dLat, dLng);
     if (distance > MAX_AUDIBLE_M) {
       // Still advance the clock so it does not fire a burst on approach.

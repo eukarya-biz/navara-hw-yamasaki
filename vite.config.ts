@@ -36,17 +36,15 @@ export default defineConfig({
       targets: [
         { src: `${NAVARA_THREE_ASSETS}/*`, dest: "." },
         { src: `${NAVARA_THREE_ASSETS}/*`, dest: "assets" },
-        { src: `${NAVARA_THREE_DIST}/*.wasm`, dest: "." },
-        { src: `${NAVARA_THREE_DIST}/*.wasm`, dest: "assets" },
       ],
     }),
   ],
   optimizeDeps: {
     exclude: [
       "@navaramap/three",
-      "@navaramap/three_default_plugin",
-      "@navaramap/three_plugins",
-      "@navaramap/three_default_descs",
+      "@navaramap/three-default-plugin",
+      "@navaramap/three-plugins",
+      "@navaramap/three-default-descs",
       "@navaramap/engine",
       "@navaramap/engine-api",
       "@navaramap/engine-worker",
